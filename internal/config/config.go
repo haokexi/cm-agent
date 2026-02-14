@@ -54,6 +54,25 @@ type Config struct {
 		ICMP    []string `yaml:"icmp"`
 		TCP     []string `yaml:"tcp"`
 	} `yaml:"probes"`
+
+	Terminal struct {
+		Enabled bool `yaml:"enabled"`
+
+		ControlWSURL  string `yaml:"control_ws_url"`
+		TerminalWSURL string `yaml:"terminal_ws_url"`
+		AgentToken    string `yaml:"agent_token"`
+
+		DialTimeout           Duration `yaml:"dial_timeout"`
+		PingInterval          Duration `yaml:"ping_interval"`
+		TLSInsecureSkipVerify bool     `yaml:"tls_insecure_skip_verify"`
+
+		Shell     string   `yaml:"shell"`
+		ShellArgs []string `yaml:"shell_args"`
+
+		MaxSessions int      `yaml:"max_sessions"`
+		MaxDuration Duration `yaml:"max_duration"`
+		IdleTimeout Duration `yaml:"idle_timeout"`
+	} `yaml:"terminal"`
 }
 
 type Duration struct{ time.Duration }

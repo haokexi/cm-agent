@@ -35,3 +35,17 @@ probes:
     - "10.0.0.2"
   tcp:
     - "10.0.0.2:443"
+
+terminal:
+  enabled: false
+  control_ws_url: "wss://server/api/agent/control/ws"
+  terminal_ws_url: "wss://server/api/agent/terminal/ws"
+  agent_token: "REPLACE_ME_LONG_LIVED"
+  dial_timeout: 10s
+  ping_interval: 30s
+  tls_insecure_skip_verify: false
+  shell: "/bin/bash"
+  shell_args: ["-l"]
+  max_sessions: 1
+  max_duration: 0s
+  idle_timeout: 0s

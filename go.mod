@@ -9,6 +9,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.6.0 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/dennwc/btrfs v0.0.0-20241002142654-12ae127e0bf6 // indirect
 	github.com/dennwc/ioctl v1.0.0 // indirect
 	github.com/ema/qdisc v1.0.0 // indirect
@@ -16,6 +17,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grafana/regexp v0.0.0-20250905093917-f7b3be9d1853 // indirect
 	github.com/hashicorp/go-envparse v0.1.0 // indirect
 	github.com/hodgesds/perf-utils v0.7.0 // indirect
@@ -37,7 +39,7 @@ require (
 	github.com/prometheus/common v0.67.4 // indirect
 	github.com/prometheus/node_exporter v1.10.2 // indirect
 	github.com/prometheus/procfs v0.19.0 // indirect
-	github.com/prometheus/prometheus v0.309.1 // indirect
+	github.com/prometheus/prometheus v0.306.0 // indirect
 	github.com/safchain/ethtool v0.6.2 // indirect
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect

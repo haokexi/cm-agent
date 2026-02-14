@@ -22,6 +22,7 @@ import (
 	"cm-agent/internal/probe"
 	"cm-agent/internal/remotewrite"
 	"cm-agent/internal/spool"
+	"cm-agent/internal/terminal"
 )
 
 func main() {
@@ -112,6 +113,55 @@ func main() {
 			"probe.tcp",
 			"TCP connect targets, repeatable (host:port).",
 		).Envar("CM_PROBE_TCP").Strings()
+
+		terminalEnabled = kingpin.Flag(
+			"terminal.enabled",
+			"Enable reverse web terminal agent.",
+		).Envar("CM_TERMINAL_ENABLED").Default("false").Bool()
+		terminalControlWSURL = kingpin.Flag(
+			"terminal.control-ws-url",
+			"Agent control websocket URL, e.g. wss://server/api/agent/control/ws",
+		).Envar("CM_TERMINAL_CONTROL_WS_URL").Default("").String()
+		terminalWSURL = kingpin.Flag(
+			"terminal.ws-url",
+			"Agent terminal websocket URL, e.g. wss://server/api/agent/terminal/ws",
+		).Envar("CM_TERMINAL_WS_URL").Default("").String()
+		terminalAgentToken = kingpin.Flag(
+			"terminal.agent-token",
+			"Long-lived token for control channel auth.",
+		).Envar("CM_TERMINAL_AGENT_TOKEN").Default("").String()
+		terminalDialTimeout = kingpin.Flag(
+			"terminal.dial-timeout",
+			"Terminal WS dial timeout.",
+		).Envar("CM_TERMINAL_DIAL_TIMEOUT").Default("10s").Duration()
+		terminalPingInterval = kingpin.Flag(
+			"terminal.ping-interval",
+			"Control/session WS keepalive ping interval.",
+		).Envar("CM_TERMINAL_PING_INTERVAL").Default("30s").Duration()
+		terminalTLSInsecure = kingpin.Flag(
+			"terminal.tls-insecure-skip-verify",
+			"Skip TLS verification for terminal/control websocket connections.",
+		).Envar("CM_TERMINAL_TLS_INSECURE_SKIP_VERIFY").Default("false").Bool()
+		terminalShell = kingpin.Flag(
+			"terminal.shell",
+			"Shell executable for terminal sessions.",
+		).Envar("CM_TERMINAL_SHELL").Default("/bin/bash").String()
+		terminalShellArgs = kingpin.Flag(
+			"terminal.shell-arg",
+			"Shell args, repeatable.",
+		).Envar("CM_TERMINAL_SHELL_ARGS").Strings()
+		terminalMaxSessions = kingpin.Flag(
+			"terminal.max-sessions",
+			"Max concurrent terminal sessions on this agent.",
+		).Envar("CM_TERMINAL_MAX_SESSIONS").Default("1").Int()
+		terminalMaxDuration = kingpin.Flag(
+			"terminal.max-duration",
+			"Max duration per terminal session (0 to disable).",
+		).Envar("CM_TERMINAL_MAX_DURATION").Default("0s").Duration()
+		terminalIdleTimeout = kingpin.Flag(
+			"terminal.idle-timeout",
+			"Idle timeout per terminal session (0 to disable).",
+		).Envar("CM_TERMINAL_IDLE_TIMEOUT").Default("0s").Duration()
 	)
 
 	kingpin.HelpFlag.Short('h')
@@ -128,6 +178,9 @@ func main() {
 		spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
+		terminalEnabled, terminalControlWSURL, terminalWSURL, terminalAgentToken,
+		terminalDialTimeout, terminalPingInterval, terminalTLSInsecure, terminalShell, terminalShellArgs,
+		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
 	)
 
 	if strings.TrimSpace(*rwURL) == "" {
@@ -194,6 +247,29 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if *terminalEnabled {
+		go func() {
+			err := terminal.RunAgent(ctx, terminal.AgentConfig{
+				Logger:                logger.With("component", "terminal-control"),
+				Enabled:               *terminalEnabled,
+				ControlWSURL:          *terminalControlWSURL,
+				TerminalWSURL:         *terminalWSURL,
+				AgentToken:            *terminalAgentToken,
+				DialTimeout:           *terminalDialTimeout,
+				PingInterval:          *terminalPingInterval,
+				TLSInsecureSkipVerify: *terminalTLSInsecure,
+				Shell:                 *terminalShell,
+				ShellArgs:             *terminalShellArgs,
+				MaxSessions:           *terminalMaxSessions,
+				MaxDuration:           *terminalMaxDuration,
+				IdleTimeout:           *terminalIdleTimeout,
+			})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logger.Warn("terminal agent exited", "err", err)
+			}
+		}()
+	}
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -368,6 +444,18 @@ func applyConfigDefaults(
 	probeTimeout *time.Duration,
 	probeICMP *[]string,
 	probeTCP *[]string,
+	terminalEnabled *bool,
+	terminalControlWSURL *string,
+	terminalWSURL *string,
+	terminalAgentToken *string,
+	terminalDialTimeout *time.Duration,
+	terminalPingInterval *time.Duration,
+	terminalTLSInsecure *bool,
+	terminalShell *string,
+	terminalShellArgs *[]string,
+	terminalMaxSessions *int,
+	terminalMaxDuration *time.Duration,
+	terminalIdleTimeout *time.Duration,
 ) {
 	if cfg == nil {
 		return
@@ -434,6 +522,43 @@ func applyConfigDefaults(
 	}
 	if len(*probeTCP) == 0 && len(cfg.Probes.TCP) > 0 {
 		*probeTCP = append(*probeTCP, cfg.Probes.TCP...)
+	}
+
+	if !*terminalEnabled && cfg.Terminal.Enabled {
+		*terminalEnabled = true
+	}
+	if *terminalControlWSURL == "" && cfg.Terminal.ControlWSURL != "" {
+		*terminalControlWSURL = cfg.Terminal.ControlWSURL
+	}
+	if *terminalWSURL == "" && cfg.Terminal.TerminalWSURL != "" {
+		*terminalWSURL = cfg.Terminal.TerminalWSURL
+	}
+	if *terminalAgentToken == "" && cfg.Terminal.AgentToken != "" {
+		*terminalAgentToken = cfg.Terminal.AgentToken
+	}
+	if *terminalDialTimeout == 10*time.Second && cfg.Terminal.DialTimeout.Duration > 0 {
+		*terminalDialTimeout = cfg.Terminal.DialTimeout.Duration
+	}
+	if *terminalPingInterval == 30*time.Second && cfg.Terminal.PingInterval.Duration > 0 {
+		*terminalPingInterval = cfg.Terminal.PingInterval.Duration
+	}
+	if !*terminalTLSInsecure && cfg.Terminal.TLSInsecureSkipVerify {
+		*terminalTLSInsecure = true
+	}
+	if *terminalShell == "/bin/bash" && cfg.Terminal.Shell != "" {
+		*terminalShell = cfg.Terminal.Shell
+	}
+	if len(*terminalShellArgs) == 0 && len(cfg.Terminal.ShellArgs) > 0 {
+		*terminalShellArgs = append(*terminalShellArgs, cfg.Terminal.ShellArgs...)
+	}
+	if *terminalMaxSessions == 1 && cfg.Terminal.MaxSessions > 0 {
+		*terminalMaxSessions = cfg.Terminal.MaxSessions
+	}
+	if *terminalMaxDuration == 0 && cfg.Terminal.MaxDuration.Duration > 0 {
+		*terminalMaxDuration = cfg.Terminal.MaxDuration.Duration
+	}
+	if *terminalIdleTimeout == 0 && cfg.Terminal.IdleTimeout.Duration > 0 {
+		*terminalIdleTimeout = cfg.Terminal.IdleTimeout.Duration
 	}
 }
 

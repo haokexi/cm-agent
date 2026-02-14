@@ -1,0 +1,30 @@
+log:
+  level: info
+
+scrape:
+  interval: 15s
+
+collectors:
+  disable_defaults: false
+  filters: []
+
+labels:
+  job: node
+  instance: ""
+  extra:
+    site: nat-a
+
+remote_write:
+  url: "http://127.0.0.1:8428/api/v1/write"
+  bearer_token: "REPLACE_ME"
+  timeout: 10s
+  max_series_per_request: 2000
+
+  spool:
+    dir: "./spool"
+    max_bytes: 104857600 # 100 MiB
+    max_files: 2000
+
+  flush:
+    max_files: 200
+

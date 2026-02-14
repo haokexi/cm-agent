@@ -1,6 +1,7 @@
 .PHONY: help test build clean \
 	build-linux-amd64 build-linux-arm64 \
-	release-linux-amd64 release-linux-arm64 release
+	release-linux-amd64 release-linux-arm64 release \
+	github-release
 
 APP := cm-agent
 DIST_DIR := dist
@@ -56,6 +57,8 @@ release-linux-arm64: build-linux-arm64
 release: release-linux-amd64 release-linux-arm64
 	@echo "Release artifacts in $(DIST_DIR)/"
 
+github-release:
+	@./scripts/github_release.sh "$(TAG)"
+
 clean:
 	rm -rf $(DIST_DIR)
-

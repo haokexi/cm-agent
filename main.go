@@ -19,6 +19,7 @@ import (
 
 	"cm-agent/internal/config"
 	"cm-agent/internal/convert"
+	"cm-agent/internal/probe"
 	"cm-agent/internal/remotewrite"
 	"cm-agent/internal/spool"
 )
@@ -94,6 +95,23 @@ func main() {
 			"log.level",
 			"Log level: debug, info, warn, error",
 		).Envar("CM_LOG_LEVEL").Default("info").String()
+
+		probeJob = kingpin.Flag(
+			"probe.job",
+			"Job label for blackbox-like probes.",
+		).Envar("CM_PROBE_JOB").Default("blackbox").String()
+		probeTimeout = kingpin.Flag(
+			"probe.timeout",
+			"Timeout per probe (icmp or tcp).",
+		).Envar("CM_PROBE_TIMEOUT").Default("2s").Duration()
+		probeICMP = kingpin.Flag(
+			"probe.icmp",
+			"ICMP ping targets, repeatable (host or ip).",
+		).Envar("CM_PROBE_ICMP").Strings()
+		probeTCP = kingpin.Flag(
+			"probe.tcp",
+			"TCP connect targets, repeatable (host:port).",
+		).Envar("CM_PROBE_TCP").Strings()
 	)
 
 	kingpin.HelpFlag.Short('h')
@@ -109,6 +127,7 @@ func main() {
 		rwURL, rwBearer, timeout, maxSeriesPerReq,
 		spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
+		probeJob, probeTimeout, probeICMP, probeTCP,
 	)
 
 	if strings.TrimSpace(*rwURL) == "" {
@@ -166,6 +185,12 @@ func main() {
 	}
 
 	baseLabels := convert.BaseLabels(*job, *instance, extraLabels)
+	probeLabels := make(map[string]string, len(extraLabels)+1)
+	for k, v := range extraLabels {
+		probeLabels[k] = v
+	}
+	probeLabels["probe_from"] = hostname
+	baseProbeLabels := convert.BaseLabels(*probeJob, "", probeLabels)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -180,6 +205,9 @@ func main() {
 	if err := collectAndPush(ctx, logger, reg, rw, diskSpool, baseLabels, internal); err != nil {
 		logger.Warn("initial push failed", "err", err)
 	}
+	if err := collectAndPushProbes(ctx, logger, rw, diskSpool, baseProbeLabels, *probeTimeout, *probeICMP, *probeTCP); err != nil {
+		logger.Warn("initial probe push failed", "err", err)
+	}
 
 	for {
 		select {
@@ -192,6 +220,9 @@ func main() {
 			}
 			if err := collectAndPush(ctx, logger, reg, rw, diskSpool, baseLabels, internal); err != nil {
 				logger.Warn("push failed", "err", err)
+			}
+			if err := collectAndPushProbes(ctx, logger, rw, diskSpool, baseProbeLabels, *probeTimeout, *probeICMP, *probeTCP); err != nil {
+				logger.Warn("probe push failed", "err", err)
 			}
 		}
 	}
@@ -333,6 +364,10 @@ func applyConfigDefaults(
 	disableDefaultCollectors *bool,
 	collectorFilters *[]string,
 	logLevel *string,
+	probeJob *string,
+	probeTimeout *time.Duration,
+	probeICMP *[]string,
+	probeTCP *[]string,
 ) {
 	if cfg == nil {
 		return
@@ -387,6 +422,71 @@ func applyConfigDefaults(
 	if *logLevel == "info" && cfg.Log.Level != "" {
 		*logLevel = cfg.Log.Level
 	}
+
+	if *probeJob == "blackbox" && cfg.Probes.Job != "" {
+		*probeJob = cfg.Probes.Job
+	}
+	if *probeTimeout == 2*time.Second && cfg.Probes.Timeout.Duration > 0 {
+		*probeTimeout = cfg.Probes.Timeout.Duration
+	}
+	if len(*probeICMP) == 0 && len(cfg.Probes.ICMP) > 0 {
+		*probeICMP = append(*probeICMP, cfg.Probes.ICMP...)
+	}
+	if len(*probeTCP) == 0 && len(cfg.Probes.TCP) > 0 {
+		*probeTCP = append(*probeTCP, cfg.Probes.TCP...)
+	}
+}
+
+func collectAndPushProbes(
+	ctx context.Context,
+	logger *slog.Logger,
+	rw *remotewrite.Client,
+	diskSpool *spool.Spool,
+	baseProbeLabels []remotewrite.Label,
+	timeout time.Duration,
+	icmpTargets []string,
+	tcpTargets []string,
+) error {
+	if len(icmpTargets) == 0 && len(tcpTargets) == 0 {
+		return nil
+	}
+	probeReg := prometheus.NewRegistry()
+	probeReg.MustRegister(probe.NewCollector(probe.Config{
+		Logger:  logger,
+		Timeout: timeout,
+		ICMP:    icmpTargets,
+		TCP:     tcpTargets,
+	}))
+
+	mfs, err := probeReg.Gather()
+	if err != nil {
+		return fmt.Errorf("probe gather: %w", err)
+	}
+	reqs, _, err := convert.ToWriteRequests(mfs, time.Now(), baseProbeLabels, rw.MaxSeriesPerRequest())
+	if err != nil {
+		return fmt.Errorf("probe convert: %w", err)
+	}
+
+	for i := range reqs {
+		payload, n, err := rw.Encode(&reqs[i])
+		if err != nil {
+			return err
+		}
+		if err := rw.PushCompressed(ctx, payload); err != nil {
+			if diskSpool != nil {
+				_, _ = enqueuePayload(diskSpool, n, payload)
+				for j := i + 1; j < len(reqs); j++ {
+					p, s, encErr := rw.Encode(&reqs[j])
+					if encErr != nil {
+						continue
+					}
+					_, _ = enqueuePayload(diskSpool, s, p)
+				}
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func parseLabels(kvs []string) (map[string]string, error) {

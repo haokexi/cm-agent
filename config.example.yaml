@@ -28,3 +28,10 @@ remote_write:
   flush:
     max_files: 200
 
+probes:
+  job: blackbox
+  timeout: 2s
+  icmp:
+    - "10.0.0.2"
+  tcp:
+    - "10.0.0.2:443"

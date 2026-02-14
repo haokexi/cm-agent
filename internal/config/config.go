@@ -47,6 +47,13 @@ type Config struct {
 			MaxFiles int `yaml:"max_files"`
 		} `yaml:"flush"`
 	} `yaml:"remote_write"`
+
+	Probes struct {
+		Job     string   `yaml:"job"`
+		Timeout Duration `yaml:"timeout"`
+		ICMP    []string `yaml:"icmp"`
+		TCP     []string `yaml:"tcp"`
+	} `yaml:"probes"`
 }
 
 type Duration struct{ time.Duration }

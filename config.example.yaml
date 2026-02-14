@@ -12,6 +12,7 @@ labels:
   job: node
   instance: ""
   extra:
+    node_id: "1"
     site: nat-a
 
 remote_write:
@@ -38,9 +39,13 @@ probes:
 
 terminal:
   enabled: false
-  control_ws_url: "wss://server/api/agent/control/ws"
-  terminal_ws_url: "wss://server/api/agent/terminal/ws"
-  agent_token: "REPLACE_ME_LONG_LIVED"
+  # Only specify server base address; agent derives:
+  # - <context_path>/terminal/agent/control/ws
+  # - <context_path>/terminal/agent/terminal/ws
+  # Example: http://127.0.0.1:9879 or https://example.com
+  server: "http://127.0.0.1:9879"
+  context_path: "/cloudmonitor"
+  agent_token: "1:REPLACE_ME_LONG_LIVED"
   dial_timeout: 10s
   ping_interval: 30s
   tls_insecure_skip_verify: false

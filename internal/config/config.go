@@ -58,9 +58,9 @@ type Config struct {
 	Terminal struct {
 		Enabled bool `yaml:"enabled"`
 
-		ControlWSURL  string `yaml:"control_ws_url"`
-		TerminalWSURL string `yaml:"terminal_ws_url"`
-		AgentToken    string `yaml:"agent_token"`
+		Server      string `yaml:"server"`
+		ContextPath string `yaml:"context_path"`
+		AgentToken  string `yaml:"agent_token"`
 
 		DialTimeout           Duration `yaml:"dial_timeout"`
 		PingInterval          Duration `yaml:"ping_interval"`

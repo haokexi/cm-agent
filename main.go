@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"syscall"
 	"time"
@@ -82,6 +84,10 @@ func main() {
 			"label",
 			"Extra labels applied to all metrics, repeatable: --label key=value",
 		).Envar("CM_LABELS").Strings()
+		nodeID = kingpin.Flag(
+			"node-id",
+			"Optional node id label. If set, injects label node_id=<id> unless already provided via --label. Used by server-side PromQL matching.",
+		).Envar("CM_NODE_ID").Default("").String()
 
 		disableDefaultCollectors = kingpin.Flag(
 			"collector.disable-defaults",
@@ -118,14 +124,14 @@ func main() {
 			"terminal.enabled",
 			"Enable reverse web terminal agent.",
 		).Envar("CM_TERMINAL_ENABLED").Default("false").Bool()
-		terminalControlWSURL = kingpin.Flag(
-			"terminal.control-ws-url",
-			"Agent control websocket URL, e.g. wss://server/api/agent/control/ws",
-		).Envar("CM_TERMINAL_CONTROL_WS_URL").Default("").String()
-		terminalWSURL = kingpin.Flag(
-			"terminal.ws-url",
-			"Agent terminal websocket URL, e.g. wss://server/api/agent/terminal/ws",
-		).Envar("CM_TERMINAL_WS_URL").Default("").String()
+		terminalServer = kingpin.Flag(
+			"terminal.server",
+			"Terminal server base address (scheme+host[:port][+optional path]). If set and ws URLs are empty, paths are derived as /cloudmonitor/terminal/agent/{control,terminal}/ws.",
+		).Envar("CM_TERMINAL_SERVER").Default("").String()
+		terminalContextPath = kingpin.Flag(
+			"terminal.context-path",
+			"Server context path (default /cloudmonitor). Used when deriving terminal ws URLs from --terminal.server.",
+		).Envar("CM_TERMINAL_CONTEXT_PATH").Default("/cloudmonitor").String()
 		terminalAgentToken = kingpin.Flag(
 			"terminal.agent-token",
 			"Long-lived token for control channel auth.",
@@ -178,10 +184,25 @@ func main() {
 		spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
-		terminalEnabled, terminalControlWSURL, terminalWSURL, terminalAgentToken,
+		terminalEnabled, terminalServer, terminalContextPath, terminalAgentToken,
 		terminalDialTimeout, terminalPingInterval, terminalTLSInsecure, terminalShell, terminalShellArgs,
 		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
 	)
+
+	var derivedTerminalControlWSURL, derivedTerminalWSURL string
+	if *terminalEnabled {
+		if strings.TrimSpace(*terminalServer) == "" {
+			fmt.Fprintln(os.Stderr, "terminal enabled but missing --terminal.server (or CM_TERMINAL_SERVER / config.terminal.server)")
+			os.Exit(2)
+		}
+		c, t, err := deriveTerminalWSURLs(*terminalServer, *terminalContextPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "derive terminal ws urls: %v\n", err)
+			os.Exit(2)
+		}
+		derivedTerminalControlWSURL = c
+		derivedTerminalWSURL = t
+	}
 
 	if strings.TrimSpace(*rwURL) == "" {
 		fmt.Fprintln(os.Stderr, "missing required remoteWrite.url (or CM_REMOTE_WRITE_URL)")
@@ -204,6 +225,19 @@ func main() {
 	if err != nil {
 		logger.Error("invalid --label", "err", err)
 		os.Exit(2)
+	}
+	// Convenience: ensure node_id label exists when user provides --node-id.
+	// Server-side status/usage queries rely on node_id="<id>" to map metrics to nodes.
+	if strings.TrimSpace(*nodeID) != "" {
+		if _, ok := extraLabels["node_id"]; !ok {
+			extraLabels["node_id"] = strings.TrimSpace(*nodeID)
+		}
+	}
+	// Convenience: if node_id isn't set, derive it from install token "<node_id>:<secret>".
+	if _, ok := extraLabels["node_id"]; !ok {
+		if nid := parseNodeIDFromInstallToken(*terminalAgentToken); nid != "" {
+			extraLabels["node_id"] = nid
+		}
 	}
 
 	reg := prometheus.NewRegistry()
@@ -253,8 +287,8 @@ func main() {
 			err := terminal.RunAgent(ctx, terminal.AgentConfig{
 				Logger:                logger.With("component", "terminal-control"),
 				Enabled:               *terminalEnabled,
-				ControlWSURL:          *terminalControlWSURL,
-				TerminalWSURL:         *terminalWSURL,
+				ControlWSURL:          derivedTerminalControlWSURL,
+				TerminalWSURL:         derivedTerminalWSURL,
 				AgentToken:            *terminalAgentToken,
 				DialTimeout:           *terminalDialTimeout,
 				PingInterval:          *terminalPingInterval,
@@ -445,8 +479,8 @@ func applyConfigDefaults(
 	probeICMP *[]string,
 	probeTCP *[]string,
 	terminalEnabled *bool,
-	terminalControlWSURL *string,
-	terminalWSURL *string,
+	terminalServer *string,
+	terminalContextPath *string,
 	terminalAgentToken *string,
 	terminalDialTimeout *time.Duration,
 	terminalPingInterval *time.Duration,
@@ -527,11 +561,11 @@ func applyConfigDefaults(
 	if !*terminalEnabled && cfg.Terminal.Enabled {
 		*terminalEnabled = true
 	}
-	if *terminalControlWSURL == "" && cfg.Terminal.ControlWSURL != "" {
-		*terminalControlWSURL = cfg.Terminal.ControlWSURL
+	if *terminalServer == "" && cfg.Terminal.Server != "" {
+		*terminalServer = cfg.Terminal.Server
 	}
-	if *terminalWSURL == "" && cfg.Terminal.TerminalWSURL != "" {
-		*terminalWSURL = cfg.Terminal.TerminalWSURL
+	if *terminalContextPath == "/cloudmonitor" && cfg.Terminal.ContextPath != "" {
+		*terminalContextPath = cfg.Terminal.ContextPath
 	}
 	if *terminalAgentToken == "" && cfg.Terminal.AgentToken != "" {
 		*terminalAgentToken = cfg.Terminal.AgentToken
@@ -633,6 +667,79 @@ func parseLabels(kvs []string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+func parseNodeIDFromInstallToken(token string) string {
+	t := strings.TrimSpace(token)
+	if t == "" {
+		return ""
+	}
+	if strings.HasPrefix(t, "Bearer ") {
+		t = strings.TrimSpace(strings.TrimPrefix(t, "Bearer "))
+	}
+	// Expect "<node_id>:<secret>".
+	nodeID, _, ok := strings.Cut(t, ":")
+	if !ok {
+		return ""
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return ""
+	}
+	for _, r := range nodeID {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return nodeID
+}
+
+func deriveTerminalWSURLs(serverBase, contextPath string) (control, terminal string, err error) {
+	sb := strings.TrimSpace(serverBase)
+	if sb == "" {
+		return "", "", errors.New("terminal.server is empty")
+	}
+	// Accept host[:port] by auto-prepending http://
+	if !strings.Contains(sb, "://") {
+		sb = "http://" + sb
+	}
+	u, err := url.Parse(sb)
+	if err != nil {
+		return "", "", err
+	}
+	// Normalize scheme to ws/wss
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+		// ok
+	default:
+		return "", "", fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+
+	// If serverBase has no path (or just "/"), use contextPath.
+	basePath := strings.TrimSpace(u.Path)
+	if basePath == "" || basePath == "/" {
+		cp := strings.TrimSpace(contextPath)
+		if cp == "" {
+			cp = "/cloudmonitor"
+		}
+		if !strings.HasPrefix(cp, "/") {
+			cp = "/" + cp
+		}
+		basePath = cp
+	}
+	basePath = strings.TrimRight(basePath, "/")
+	u.RawQuery = ""
+	u.Fragment = ""
+
+	ctl := *u
+	ctl.Path = path.Clean(basePath + "/terminal/agent/control/ws")
+	term := *u
+	term.Path = path.Clean(basePath + "/terminal/agent/terminal/ws")
+	return ctl.String(), term.String(), nil
 }
 
 func parseLevel(s string) slog.Level {

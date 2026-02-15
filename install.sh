@@ -4,7 +4,7 @@ set -euo pipefail
 # One-click installer for cm-agent (Linux + systemd preferred).
 #
 # Example:
-#   curl -fsSL https://raw.githubusercontent.com/haokexi/cm-agent/main/install.sh | sudo bash -s -- \
+#   curl -fsSL https://raw.githubusercontent.com/haokexi/cm-agent/HEAD/install.sh | sudo bash -s -- \
 #     --server http://1.2.3.4:9879 \
 #     --agent-token "1:xxxx" \
 #     --remote-write-url "http://1.2.3.4:8428/api/v1/write" \
@@ -12,15 +12,21 @@ set -euo pipefail
 #
 # Notes:
 # - agent token format is "<node_id>:<secret>" (also used to derive node_id label automatically).
-# - this installer writes config to /etc/cm-agent/config.yaml and installs a systemd unit.
+# - this installer writes config to /opt/cm-agent/config.yaml and installs a systemd unit.
 
 REPO="haokexi/cm-agent"
 SERVICE_NAME="cm-agent"
-BIN_PATH="/usr/local/bin/cm-agent"
-CONFIG_DIR="/etc/cm-agent"
-CONFIG_PATH="/etc/cm-agent/config.yaml"
-DATA_DIR="/var/lib/cm-agent"
-SPOOL_DIR="/var/lib/cm-agent/spool"
+
+# Install layout:
+# - Place binary and config under /opt/cm-agent (avoid polluting host PATH/bin).
+# - Keep data/spool under the same directory by default so uninstall is self-contained.
+INSTALL_DIR="/opt/cm-agent"
+BIN_PATH="${INSTALL_DIR}/cm-agent"
+CONFIG_DIR="${INSTALL_DIR}"
+CONFIG_PATH="${INSTALL_DIR}/config.yaml"
+DATA_DIR="${INSTALL_DIR}/data"
+SPOOL_DIR="${DATA_DIR}/spool"
+SPOOL_DIR_SET="false"
 SPOOL_MAX_BYTES="104857600" # 100MiB
 SCRAPE_INTERVAL="15s"
 CONTEXT_PATH="/cloudmonitor"
@@ -66,8 +72,8 @@ Options:
 
   --scrape-interval <dur>                default 15s
   --spool-max-bytes <bytes>              default 104857600 (100MiB)
-  --spool-dir <dir>                      default /var/lib/cm-agent/spool
-  --data-dir <dir>                       default /var/lib/cm-agent
+  --spool-dir <dir>                      default /opt/cm-agent/data/spool
+  --data-dir <dir>                       default /opt/cm-agent/data
 
   --enable-terminal <true|false>         default true
   --terminal-tls-insecure <true|false>   default false
@@ -89,7 +95,7 @@ while [[ $# -gt 0 ]]; do
     --remote-write-bearer-token) RW_BEARER="${2:-}"; shift 2 ;;
     --scrape-interval) SCRAPE_INTERVAL="${2:-}"; shift 2 ;;
     --spool-max-bytes) SPOOL_MAX_BYTES="${2:-}"; shift 2 ;;
-    --spool-dir) SPOOL_DIR="${2:-}"; shift 2 ;;
+    --spool-dir) SPOOL_DIR="${2:-}"; SPOOL_DIR_SET="true"; shift 2 ;;
     --data-dir) DATA_DIR="${2:-}"; shift 2 ;;
     --enable-terminal) ENABLE_TERMINAL="${2:-}"; shift 2 ;;
     --terminal-tls-insecure) TLS_INSECURE="${2:-}"; shift 2 ;;
@@ -98,6 +104,11 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown arg: $1" ;;
   esac
 done
+
+# If user overrides --data-dir but not --spool-dir, keep spool colocated under data dir.
+if [[ "${SPOOL_DIR_SET}" != "true" ]]; then
+  SPOOL_DIR="${DATA_DIR%/}/spool"
+fi
 
 if [[ "${UNINSTALL}" == "true" ]]; then
   need_root
@@ -109,8 +120,7 @@ if [[ "${UNINSTALL}" == "true" ]]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
   fi
   rm -f "${BIN_PATH}" || true
-  rm -rf "${CONFIG_DIR}" || true
-  rm -rf "${DATA_DIR}" || true
+  rm -rf "${INSTALL_DIR}" || true
   log "uninstall done"
   exit 0
 fi
@@ -149,29 +159,71 @@ resolve_latest_tag() {
   echo "${loc##*/}"
 }
 
+with_proxy() {
+  local url="$1"
+  if [[ -n "${GITHUB_PROXY}" ]]; then
+    echo "${GITHUB_PROXY%/}/${url}"
+    return 0
+  fi
+  echo "${url}"
+}
+
+download_from_candidates() {
+  local out="$1"
+  shift
+  local -a urls=("$@")
+  local u
+  for u in "${urls[@]}"; do
+    if curl -fsSL -o "${out}" "${u}" >/dev/null 2>&1; then
+      echo "${u}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 tag="${VERSION}"
 if [[ "${VERSION}" == "latest" ]]; then
   tag="$(resolve_latest_tag)"
 fi
 
 asset="cm-agent-linux-${arch}.tgz"
-base="https://github.com/${REPO}/releases/download/${tag}/${asset}"
-if [[ -n "${GITHUB_PROXY}" ]]; then
-  base="${GITHUB_PROXY%/}/${base}"
+tags_to_try=("${tag}")
+if [[ "${tag}" == v* ]]; then
+  tags_to_try+=("${tag#v}")
+else
+  tags_to_try+=("v${tag}")
 fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
+asset_urls=()
+for t in "${tags_to_try[@]}"; do
+  asset_urls+=("$(with_proxy "https://github.com/${REPO}/releases/download/${t}/${asset}")")
+done
+
 log "downloading ${asset} (${tag})..."
-curl -fsSL -o "${tmp}/${asset}" "${base}"
+downloaded_from="$(download_from_candidates "${tmp}/${asset}" "${asset_urls[@]}" || true)"
+if [[ -z "${downloaded_from}" ]]; then
+  echo "[cm-agent] ERROR: failed to download release asset."
+  echo "[cm-agent] ERROR: attempted URLs:"
+  for u in "${asset_urls[@]}"; do
+    echo "  - ${u}"
+  done
+  echo "[cm-agent] ERROR: this usually means the GitHub Release exists but the ${asset} asset was not uploaded (or the tag differs, e.g. v${tag})."
+  echo "[cm-agent] ERROR: fix by publishing release assets (run: make release && TAG=vX.Y.Z make github-release) or install with --version <existing-tag>."
+  exit 1
+fi
 
 sha_asset="${asset}.sha256"
-sha_url="https://github.com/${REPO}/releases/download/${tag}/${sha_asset}"
-if [[ -n "${GITHUB_PROXY}" ]]; then
-  sha_url="${GITHUB_PROXY%/}/${sha_url}"
-fi
-if curl -fsSL -o "${tmp}/${sha_asset}" "${sha_url}" >/dev/null 2>&1; then
+sha_urls=()
+for t in "${tags_to_try[@]}"; do
+  sha_urls+=("$(with_proxy "https://github.com/${REPO}/releases/download/${t}/${sha_asset}")")
+done
+
+sha_from="$(download_from_candidates "${tmp}/${sha_asset}" "${sha_urls[@]}" || true)"
+if [[ -n "${sha_from}" ]]; then
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "${tmp}" && sha256sum -c "${sha_asset}") || die "sha256 verify failed"
   elif command -v shasum >/dev/null 2>&1; then
@@ -187,6 +239,8 @@ fi
 log "extracting..."
 tar -C "${tmp}" -xzf "${tmp}/${asset}"
 [[ -f "${tmp}/cm-agent-linux-${arch}" ]] || die "archive missing cm-agent-linux-${arch}"
+
+mkdir -p "${INSTALL_DIR}"
 
 log "installing binary to ${BIN_PATH}..."
 install -m 0755 "${tmp}/cm-agent-linux-${arch}" "${BIN_PATH}"
@@ -283,4 +337,3 @@ systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"
 
 log "done. logs: journalctl -u ${SERVICE_NAME} -f"
-

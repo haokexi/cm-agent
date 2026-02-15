@@ -26,7 +26,12 @@ if [[ ! -d dist ]]; then
   exit 2
 fi
 
-mapfile -t ASSETS < <(ls -1 dist/*.tgz dist/*.sha256 2>/dev/null || true)
+# bash 3.2 (default on macOS) doesn't have `mapfile`/`readarray`.
+ASSETS=()
+for f in dist/*.tgz dist/*.sha256; do
+  [[ -e "${f}" ]] || continue
+  ASSETS+=("${f}")
+done
 if [[ "${#ASSETS[@]}" -eq 0 ]]; then
   echo "No assets found in dist/ (*.tgz, *.sha256). Run: make release"
   exit 2
@@ -98,4 +103,3 @@ for f in "${ASSETS[@]}"; do
 done
 
 echo "Release ready: ${html_url:-https://github.com/${owner}/${repo}/releases/tag/${TAG}}"
-

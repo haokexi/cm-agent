@@ -334,6 +334,14 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}.service"
+
+# If service is already running, restart to pick up new binary/config.
+# `enable --now` will not restart an active service.
+systemctl enable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+  systemctl restart "${SERVICE_NAME}.service"
+else
+  systemctl start "${SERVICE_NAME}.service"
+fi
 
 log "done. logs: journalctl -u ${SERVICE_NAME} -f"

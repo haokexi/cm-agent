@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -27,6 +28,9 @@ type SessionConfig struct {
 
 	Shell     string
 	ShellArgs []string
+	// Term is exported to the PTY process as TERM. This is required for interactive
+	// TUIs like top/htop/vim to render correctly. systemd services often have TERM unset.
+	Term string
 
 	Cols int
 	Rows int
@@ -55,6 +59,9 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 	if len(cfg.ShellArgs) == 0 {
 		cfg.ShellArgs = []string{"-l"}
 	}
+	if strings.TrimSpace(cfg.Term) == "" {
+		cfg.Term = "xterm-256color"
+	}
 	if cfg.SessionID == "" {
 		return errors.New("session id is required")
 	}
@@ -80,6 +87,7 @@ func RunSession(ctx context.Context, cfg SessionConfig) error {
 
 	// Start PTY shell.
 	cmd := exec.CommandContext(sctx, cfg.Shell, cfg.ShellArgs...)
+	cmd.Env = upsertEnv(os.Environ(), "TERM", cfg.Term)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("start pty: %w", err)
@@ -217,4 +225,19 @@ func withQuery(base, k, v string) (string, error) {
 	q.Set(k, v)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func upsertEnv(env []string, k, v string) []string {
+	k = strings.TrimSpace(k)
+	if k == "" {
+		return env
+	}
+	prefix := k + "="
+	for i := range env {
+		if strings.HasPrefix(env[i], prefix) {
+			env[i] = prefix + v
+			return env
+		}
+	}
+	return append(env, prefix+v)
 }

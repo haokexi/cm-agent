@@ -68,6 +68,7 @@ type Config struct {
 
 		Shell     string   `yaml:"shell"`
 		ShellArgs []string `yaml:"shell_args"`
+		Term      string   `yaml:"term"`
 
 		MaxSessions int      `yaml:"max_sessions"`
 		MaxDuration Duration `yaml:"max_duration"`

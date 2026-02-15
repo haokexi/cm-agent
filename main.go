@@ -156,6 +156,10 @@ func main() {
 			"terminal.shell-arg",
 			"Shell args, repeatable.",
 		).Envar("CM_TERMINAL_SHELL_ARGS").Strings()
+		terminalTerm = kingpin.Flag(
+			"terminal.term",
+			"TERM value exported to terminal sessions (for TUIs like top/vim).",
+		).Envar("CM_TERMINAL_TERM").Default("xterm-256color").String()
 		terminalMaxSessions = kingpin.Flag(
 			"terminal.max-sessions",
 			"Max concurrent terminal sessions on this agent.",
@@ -185,7 +189,7 @@ func main() {
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
 		terminalEnabled, terminalServer, terminalContextPath, terminalAgentToken,
-		terminalDialTimeout, terminalPingInterval, terminalTLSInsecure, terminalShell, terminalShellArgs,
+		terminalDialTimeout, terminalPingInterval, terminalTLSInsecure, terminalShell, terminalShellArgs, terminalTerm,
 		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
 	)
 
@@ -295,6 +299,7 @@ func main() {
 				TLSInsecureSkipVerify: *terminalTLSInsecure,
 				Shell:                 *terminalShell,
 				ShellArgs:             *terminalShellArgs,
+				Term:                  *terminalTerm,
 				MaxSessions:           *terminalMaxSessions,
 				MaxDuration:           *terminalMaxDuration,
 				IdleTimeout:           *terminalIdleTimeout,
@@ -487,6 +492,7 @@ func applyConfigDefaults(
 	terminalTLSInsecure *bool,
 	terminalShell *string,
 	terminalShellArgs *[]string,
+	terminalTerm *string,
 	terminalMaxSessions *int,
 	terminalMaxDuration *time.Duration,
 	terminalIdleTimeout *time.Duration,
@@ -584,6 +590,9 @@ func applyConfigDefaults(
 	}
 	if len(*terminalShellArgs) == 0 && len(cfg.Terminal.ShellArgs) > 0 {
 		*terminalShellArgs = append(*terminalShellArgs, cfg.Terminal.ShellArgs...)
+	}
+	if *terminalTerm == "xterm-256color" && cfg.Terminal.Term != "" {
+		*terminalTerm = cfg.Terminal.Term
 	}
 	if *terminalMaxSessions == 1 && cfg.Terminal.MaxSessions > 0 {
 		*terminalMaxSessions = cfg.Terminal.MaxSessions

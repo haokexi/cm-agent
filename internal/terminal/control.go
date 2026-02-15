@@ -32,6 +32,7 @@ type AgentConfig struct {
 
 	Shell     string
 	ShellArgs []string
+	Term      string
 
 	MaxSessions int
 	MaxDuration time.Duration
@@ -181,6 +182,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				BearerToken:           m.AgentSessionToken,
 				Shell:                 cfg.Shell,
 				ShellArgs:             cfg.ShellArgs,
+				Term:                  cfg.Term,
 				Cols:                  m.Cols,
 				Rows:                  m.Rows,
 				DialTimeout:           cfg.DialTimeout,

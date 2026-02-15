@@ -19,6 +19,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/node_exporter/collector"
 
+	"cm-agent/internal/agentinfo"
 	"cm-agent/internal/config"
 	"cm-agent/internal/convert"
 	"cm-agent/internal/probe"
@@ -257,6 +258,7 @@ func main() {
 
 	internal := newInternalMetrics()
 	reg.MustRegister(internal)
+	reg.MustRegister(agentinfo.New())
 
 	rw := remotewrite.NewClient(remotewrite.Config{
 		URL:                 *rwURL,

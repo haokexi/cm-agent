@@ -47,12 +47,14 @@ build-linux-arm64: | $(DIST_DIR)
 release-linux-amd64: build-linux-amd64
 	cp -f config.example.yaml $(DIST_DIR)/config.example.yaml
 	tar -C $(DIST_DIR) -czf $(DIST_DIR)/$(APP)-linux-amd64.tgz $(APP)-linux-amd64 config.example.yaml
-	shasum -a 256 $(DIST_DIR)/$(APP)-linux-amd64.tgz > $(DIST_DIR)/$(APP)-linux-amd64.tgz.sha256
+	# Write checksum with a basename (no dist/ prefix) so `sha256sum -c` works after downloading elsewhere.
+	cd $(DIST_DIR) && shasum -a 256 $(APP)-linux-amd64.tgz > $(APP)-linux-amd64.tgz.sha256
 
 release-linux-arm64: build-linux-arm64
 	cp -f config.example.yaml $(DIST_DIR)/config.example.yaml
 	tar -C $(DIST_DIR) -czf $(DIST_DIR)/$(APP)-linux-arm64.tgz $(APP)-linux-arm64 config.example.yaml
-	shasum -a 256 $(DIST_DIR)/$(APP)-linux-arm64.tgz > $(DIST_DIR)/$(APP)-linux-arm64.tgz.sha256
+	# Write checksum with a basename (no dist/ prefix) so `sha256sum -c` works after downloading elsewhere.
+	cd $(DIST_DIR) && shasum -a 256 $(APP)-linux-arm64.tgz > $(APP)-linux-arm64.tgz.sha256
 
 release: release-linux-amd64 release-linux-arm64
 	@echo "Release artifacts in $(DIST_DIR)/"

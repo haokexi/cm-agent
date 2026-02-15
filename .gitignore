@@ -1,0 +1,10 @@
+# Build outputs
+/cm-agent
+/dist/
+
+# Local runtime data
+/spool/
+
+# IDE
+/.idea/
+

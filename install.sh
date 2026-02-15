@@ -224,11 +224,21 @@ done
 
 sha_from="$(download_from_candidates "${tmp}/${sha_asset}" "${sha_urls[@]}" || true)"
 if [[ -n "${sha_from}" ]]; then
+  # The checksum file name field may include a path prefix (e.g. "dist/foo.tgz"),
+  # which breaks `sha256sum -c` in our temp directory. Compare hashes directly.
+  expected="$(awk 'NF{print $1; exit}' "${tmp}/${sha_asset}" || true)"
+  if [[ -z "${expected}" || "${#expected}" -ne 64 ]]; then
+    # Fallback for formats like: "SHA256 (file) = <hash>"
+    expected="$(awk 'NF{print $NF; exit}' "${tmp}/${sha_asset}" || true)"
+  fi
+  [[ -n "${expected}" ]] || die "invalid sha256 file"
+
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "${tmp}" && sha256sum -c "${sha_asset}") || die "sha256 verify failed"
+    actual="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
+    [[ "${expected}" == "${actual}" ]] || die "sha256 verify failed"
   elif command -v shasum >/dev/null 2>&1; then
-    # shasum expects "hash  file", same as our generated format.
-    (cd "${tmp}" && shasum -a 256 -c "${sha_asset}") || die "sha256 verify failed"
+    actual="$(shasum -a 256 "${tmp}/${asset}" | awk '{print $1}')"
+    [[ "${expected}" == "${actual}" ]] || die "sha256 verify failed"
   else
     log "sha tool not found; skipping checksum verify"
   fi

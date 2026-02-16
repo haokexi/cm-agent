@@ -37,6 +37,9 @@ type AgentConfig struct {
 	MaxSessions int
 	MaxDuration time.Duration
 	IdleTimeout time.Duration
+
+	// OnSyncLabels applies dynamic labels pushed from server over control WS.
+	OnSyncLabels func(map[string]string, int64) error
 }
 
 func RunAgent(ctx context.Context, cfg AgentConfig) error {
@@ -156,7 +159,20 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 			cfg.Logger.Warn("invalid control message", "err", err)
 			continue
 		}
-		if msg.Type != "open_terminal" {
+		switch msg.Type {
+		case "sync_labels":
+			if cfg.OnSyncLabels == nil {
+				continue
+			}
+			if err := cfg.OnSyncLabels(msg.Labels, msg.Version); err != nil {
+				cfg.Logger.Warn("apply sync labels failed", "err", err)
+			} else {
+				cfg.Logger.Info("applied sync labels", "labels", len(msg.Labels), "version", msg.Version)
+			}
+			continue
+		case "open_terminal":
+			// continue below
+		default:
 			continue
 		}
 

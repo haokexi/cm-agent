@@ -11,6 +11,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -227,7 +228,7 @@ func main() {
 		collector.DisableDefaultCollectors()
 	}
 
-	extraLabels, err := parseLabels(*labelKVs)
+	staticExtraLabels, err := parseLabels(*labelKVs)
 	if err != nil {
 		logger.Error("invalid --label", "err", err)
 		os.Exit(2)
@@ -235,15 +236,38 @@ func main() {
 	// Convenience: ensure node_id label exists when user provides --node-id.
 	// Server-side status/usage queries rely on node_id="<id>" to map metrics to nodes.
 	if strings.TrimSpace(*nodeID) != "" {
-		if _, ok := extraLabels["node_id"]; !ok {
-			extraLabels["node_id"] = strings.TrimSpace(*nodeID)
+		if _, ok := staticExtraLabels["node_id"]; !ok {
+			staticExtraLabels["node_id"] = strings.TrimSpace(*nodeID)
 		}
 	}
 	// Convenience: if node_id isn't set, derive it from install token "<node_id>:<secret>".
-	if _, ok := extraLabels["node_id"]; !ok {
+	if _, ok := staticExtraLabels["node_id"]; !ok {
 		if nid := parseNodeIDFromInstallToken(*terminalAgentToken); nid != "" {
-			extraLabels["node_id"] = nid
+			staticExtraLabels["node_id"] = nid
 		}
+	}
+	managedLabels := newManagedLabelState()
+
+	buildLabelSets := func() (base []remotewrite.Label, probe []remotewrite.Label) {
+		merged := cloneLabels(staticExtraLabels)
+		for k, v := range managedLabels.Snapshot() {
+			// Keep static node_id stable for server-side node matching.
+			if k == "node_id" {
+				if _, exists := staticExtraLabels["node_id"]; exists {
+					continue
+				}
+			}
+			merged[k] = v
+		}
+
+		base = convert.BaseLabels(*job, *instance, merged)
+		probeExtra := make(map[string]string, len(merged)+1)
+		for k, v := range merged {
+			probeExtra[k] = v
+		}
+		probeExtra["probe_from"] = hostname
+		probe = convert.BaseLabels(*probeJob, "", probeExtra)
+		return base, probe
 	}
 
 	reg := prometheus.NewRegistry()
@@ -278,14 +302,6 @@ func main() {
 		}
 	}
 
-	baseLabels := convert.BaseLabels(*job, *instance, extraLabels)
-	probeLabels := make(map[string]string, len(extraLabels)+1)
-	for k, v := range extraLabels {
-		probeLabels[k] = v
-	}
-	probeLabels["probe_from"] = hostname
-	baseProbeLabels := convert.BaseLabels(*probeJob, "", probeLabels)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -306,6 +322,19 @@ func main() {
 				MaxSessions:           *terminalMaxSessions,
 				MaxDuration:           *terminalMaxDuration,
 				IdleTimeout:           *terminalIdleTimeout,
+				OnSyncLabels: func(labels map[string]string, version int64) error {
+					normalized := make(map[string]string, len(labels))
+					for k, v := range labels {
+						k = strings.TrimSpace(k)
+						v = strings.TrimSpace(v)
+						if err := validateLabelKV(k, v); err != nil {
+							return err
+						}
+						normalized[k] = v
+					}
+					managedLabels.Apply(normalized, version)
+					return nil
+				},
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				logger.Warn("terminal agent exited", "err", err)
@@ -320,6 +349,7 @@ func main() {
 	if _, err := flushSpool(ctx, logger, rw, diskSpool, *flushMaxFiles); err != nil {
 		logger.Warn("initial spool flush failed", "err", err)
 	}
+	baseLabels, baseProbeLabels := buildLabelSets()
 	if err := collectAndPush(ctx, logger, reg, rw, diskSpool, baseLabels, internal); err != nil {
 		logger.Warn("initial push failed", "err", err)
 	}
@@ -336,6 +366,7 @@ func main() {
 			if _, err := flushSpool(ctx, logger, rw, diskSpool, *flushMaxFiles); err != nil {
 				logger.Warn("spool flush failed", "err", err)
 			}
+			baseLabels, baseProbeLabels := buildLabelSets()
 			if err := collectAndPush(ctx, logger, reg, rw, diskSpool, baseLabels, internal); err != nil {
 				logger.Warn("push failed", "err", err)
 			}
@@ -466,6 +497,44 @@ func enqueuePayload(s *spool.Spool, series int, payload []byte) (int, error) {
 		return 0, err
 	}
 	return series, nil
+}
+
+type managedLabelState struct {
+	mu      sync.RWMutex
+	labels  map[string]string
+	version int64
+}
+
+func newManagedLabelState() *managedLabelState {
+	return &managedLabelState{
+		labels: make(map[string]string),
+	}
+}
+
+func (s *managedLabelState) Apply(labels map[string]string, version int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version > 0 && s.version > 0 && version < s.version {
+		return
+	}
+	s.labels = cloneLabels(labels)
+	if version > 0 {
+		s.version = version
+	}
+}
+
+func (s *managedLabelState) Snapshot() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneLabels(s.labels)
+}
+
+func cloneLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func applyConfigDefaults(
@@ -693,13 +762,13 @@ func validateLabelKV(k, v string) error {
 	if !labelKeyRegexp.MatchString(k) {
 		return fmt.Errorf("invalid label key %q (must match [A-Za-z_][A-Za-z0-9_]*)", k)
 	}
-	if len(k) > 256 {
+	if len([]byte(k)) > 256 {
 		return fmt.Errorf("label key %q exceeds 256 bytes", k)
 	}
 	if v == "" {
 		return fmt.Errorf("label value for %q cannot be empty", k)
 	}
-	if len(v) > 256 {
+	if len([]byte(v)) > 256 {
 		return fmt.Errorf("label value for %q exceeds 256 bytes", k)
 	}
 	if strings.Contains(v, ",") {

@@ -15,6 +15,10 @@ type ControlMessage struct {
 
 	Cols int `json:"cols"`
 	Rows int `json:"rows"`
+
+	// Used by sync_labels control message.
+	Labels  map[string]string `json:"labels,omitempty"`
+	Version int64             `json:"version,omitempty"`
 }
 
 type ResizeMessage struct {

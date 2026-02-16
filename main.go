@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -672,12 +673,44 @@ func parseLabels(kvs []string) (map[string]string, error) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
-		if k == "__name__" {
-			return nil, errors.New("label __name__ is reserved")
+		if err := validateLabelKV(k, v); err != nil {
+			return nil, err
+		}
+		if _, exists := out[k]; exists {
+			return nil, fmt.Errorf("duplicate label key %q", k)
 		}
 		out[k] = v
 	}
 	return out, nil
+}
+
+var labelKeyRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validateLabelKV(k, v string) error {
+	if k == "__name__" {
+		return errors.New("label __name__ is reserved")
+	}
+	if !labelKeyRegexp.MatchString(k) {
+		return fmt.Errorf("invalid label key %q (must match [A-Za-z_][A-Za-z0-9_]*)", k)
+	}
+	if len(k) > 256 {
+		return fmt.Errorf("label key %q exceeds 256 bytes", k)
+	}
+	if v == "" {
+		return fmt.Errorf("label value for %q cannot be empty", k)
+	}
+	if len(v) > 256 {
+		return fmt.Errorf("label value for %q exceeds 256 bytes", k)
+	}
+	if strings.Contains(v, ",") {
+		return fmt.Errorf("label value for %q cannot contain comma", k)
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("label value for %q contains control character", k)
+		}
+	}
+	return nil
 }
 
 func parseNodeIDFromInstallToken(token string) string {

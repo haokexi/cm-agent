@@ -37,6 +37,7 @@ SERVER=""
 AGENT_TOKEN=""
 RW_URL=""
 RW_BEARER=""
+LABEL_KVS=()
 ENABLE_TERMINAL="true"
 TLS_INSECURE="false"
 
@@ -45,6 +46,70 @@ UNINSTALL="false"
 
 log() { echo "[cm-agent] $*"; }
 die() { echo "[cm-agent] ERROR: $*" >&2; exit 1; }
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "${s}"
+}
+
+utf8_bytes() {
+  LC_ALL=C printf '%s' "$1" | wc -c | awk '{print $1}'
+}
+
+yaml_escape_double_quoted() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "${s}"
+}
+
+normalize_and_validate_labels() {
+  local -a normalized=()
+  local seen=","
+  local kv key value key_len value_len
+  for kv in "${LABEL_KVS[@]}"; do
+    kv="$(trim "${kv}")"
+    [[ -n "${kv}" ]] || continue
+    if [[ "${kv}" != *"="* ]]; then
+      die "invalid --label value: ${kv} (expect key=value)"
+    fi
+    key="$(trim "${kv%%=*}")"
+    value="$(trim "${kv#*=}")"
+    [[ -n "${key}" ]] || die "label key cannot be empty"
+    [[ -n "${value}" ]] || die "label value cannot be empty"
+    [[ "${key}" != "__name__" ]] || die "label key __name__ is reserved"
+    [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid label key: ${key}"
+    [[ "${value}" != *","* ]] || die "label value cannot contain comma: ${key}"
+    [[ "${value}" != *$'\n'* ]] || die "label value cannot contain newline: ${key}"
+    [[ "${value}" != *$'\r'* ]] || die "label value cannot contain carriage return: ${key}"
+    key_len="$(utf8_bytes "${key}")"
+    value_len="$(utf8_bytes "${value}")"
+    (( key_len <= 256 )) || die "label key exceeds 256 bytes: ${key}"
+    (( value_len <= 256 )) || die "label value exceeds 256 bytes: ${key}"
+    if [[ "${seen}" == *",${key},"* ]]; then
+      die "duplicate label key: ${key}"
+    fi
+    seen="${seen}${key},"
+    normalized+=("${key}=${value}")
+  done
+  LABEL_KVS=("${normalized[@]}")
+}
+
+build_labels_extra_yaml() {
+  if [[ ${#LABEL_KVS[@]} -eq 0 ]]; then
+    echo "  extra: {}"
+    return 0
+  fi
+  echo "  extra:"
+  local kv key value
+  for kv in "${LABEL_KVS[@]}"; do
+    key="${kv%%=*}"
+    value="${kv#*=}"
+    echo "    ${key}: \"$(yaml_escape_double_quoted "${value}")\""
+  done
+}
 
 need_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -69,6 +134,7 @@ Options:
 
   --remote-write-url <url>               remote_write URL (required)
   --remote-write-bearer-token <token>    remote_write bearer token (required)
+  --label <key=value>                    extra metric label, repeatable (max 256 bytes for key/value)
 
   --scrape-interval <dur>                default 15s
   --spool-max-bytes <bytes>              default 104857600 (100MiB)
@@ -91,6 +157,7 @@ while [[ $# -gt 0 ]]; do
     --server) SERVER="${2:-}"; shift 2 ;;
     --context-path) CONTEXT_PATH="${2:-}"; shift 2 ;;
     --agent-token) AGENT_TOKEN="${2:-}"; shift 2 ;;
+    --label) LABEL_KVS+=("${2:-}"); shift 2 ;;
     --remote-write-url) RW_URL="${2:-}"; shift 2 ;;
     --remote-write-bearer-token) RW_BEARER="${2:-}"; shift 2 ;;
     --scrape-interval) SCRAPE_INTERVAL="${2:-}"; shift 2 ;;
@@ -149,6 +216,9 @@ fi
 if [[ "${ENABLE_TERMINAL}" == "true" && -z "${SERVER}" ]]; then
   die "--server is required when --enable-terminal=true"
 fi
+
+normalize_and_validate_labels
+LABELS_EXTRA_YAML="$(build_labels_extra_yaml)"
 
 resolve_latest_tag() {
   local url="https://github.com/${REPO}/releases/latest"
@@ -274,7 +344,7 @@ collectors:
 labels:
   job: node
   instance: ""
-  extra: {}
+${LABELS_EXTRA_YAML}
 
 remote_write:
   url: "${RW_URL}"

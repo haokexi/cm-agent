@@ -304,9 +304,10 @@ terminal:
   tls_insecure_skip_verify: ${TLS_INSECURE}
   shell: "/bin/bash"
   shell_args: ["-l"]
-  max_sessions: 1
-  max_duration: 0s
-  idle_timeout: 0s
+  term: "xterm-256color"
+  max_sessions: 3
+  max_duration: 2h
+  idle_timeout: 10m
 EOF
 
 chmod 0600 "${CONFIG_PATH}"

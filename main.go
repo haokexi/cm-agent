@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
@@ -247,6 +248,7 @@ func main() {
 		}
 	}
 	managedLabels := newManagedLabelState()
+	managedProbes := newManagedProbeState()
 
 	buildLabelSets := func() (base []remotewrite.Label, probe []remotewrite.Label) {
 		merged := cloneLabels(staticExtraLabels)
@@ -335,6 +337,11 @@ func main() {
 					managedLabels.Apply(normalized, version)
 					return nil
 				},
+				OnSyncProbes: func(rules []terminal.ProbeRule, version int64) error {
+					normalized := normalizeManagedProbeRules(rules, *probeTimeout, logger)
+					managedProbes.Apply(normalized, version)
+					return nil
+				},
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				logger.Warn("terminal agent exited", "err", err)
@@ -353,7 +360,10 @@ func main() {
 	if err := collectAndPush(ctx, logger, reg, rw, diskSpool, baseLabels, internal); err != nil {
 		logger.Warn("initial push failed", "err", err)
 	}
-	if err := collectAndPushProbes(ctx, logger, rw, diskSpool, baseProbeLabels, *probeTimeout, *probeICMP, *probeTCP); err != nil {
+	if err := collectAndPushProbes(
+		ctx, logger, rw, diskSpool, baseProbeLabels,
+		*probeTimeout, *probeICMP, *probeTCP, managedProbes.DueTargets(time.Now()),
+	); err != nil {
 		logger.Warn("initial probe push failed", "err", err)
 	}
 
@@ -370,7 +380,10 @@ func main() {
 			if err := collectAndPush(ctx, logger, reg, rw, diskSpool, baseLabels, internal); err != nil {
 				logger.Warn("push failed", "err", err)
 			}
-			if err := collectAndPushProbes(ctx, logger, rw, diskSpool, baseProbeLabels, *probeTimeout, *probeICMP, *probeTCP); err != nil {
+			if err := collectAndPushProbes(
+				ctx, logger, rw, diskSpool, baseProbeLabels,
+				*probeTimeout, *probeICMP, *probeTCP, managedProbes.DueTargets(time.Now()),
+			); err != nil {
 				logger.Warn("probe push failed", "err", err)
 			}
 		}
@@ -503,6 +516,139 @@ type managedLabelState struct {
 	mu      sync.RWMutex
 	labels  map[string]string
 	version int64
+}
+
+type managedProbeRule struct {
+	RuleID   string
+	Module   string
+	Target   string
+	Interval time.Duration
+	Timeout  time.Duration
+}
+
+type managedProbeState struct {
+	mu      sync.Mutex
+	rules   map[string]managedProbeRule
+	lastRun map[string]time.Time
+	version int64
+}
+
+func newManagedProbeState() *managedProbeState {
+	return &managedProbeState{
+		rules:   make(map[string]managedProbeRule),
+		lastRun: make(map[string]time.Time),
+	}
+}
+
+func (s *managedProbeState) Apply(rules []managedProbeRule, version int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version > 0 && s.version > 0 && version < s.version {
+		return
+	}
+
+	nextRules := make(map[string]managedProbeRule, len(rules))
+	nextLastRun := make(map[string]time.Time, len(rules))
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.RuleID) == "" {
+			continue
+		}
+		nextRules[rule.RuleID] = rule
+		if t, ok := s.lastRun[rule.RuleID]; ok {
+			nextLastRun[rule.RuleID] = t
+		}
+	}
+	s.rules = nextRules
+	s.lastRun = nextLastRun
+	if version > 0 {
+		s.version = version
+	}
+}
+
+func (s *managedProbeState) DueTargets(now time.Time) []probe.Target {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.rules) == 0 {
+		return nil
+	}
+	var out []probe.Target
+	for rid, rule := range s.rules {
+		interval := rule.Interval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		last, ok := s.lastRun[rid]
+		if ok && now.Sub(last) < interval {
+			continue
+		}
+		s.lastRun[rid] = now
+		out = append(out, probe.Target{
+			Module:   rule.Module,
+			Instance: rule.Target,
+			RuleID:   rid,
+			Timeout:  rule.Timeout,
+		})
+	}
+	return out
+}
+
+func normalizeManagedProbeRules(in []terminal.ProbeRule, defaultTimeout time.Duration, logger *slog.Logger) []managedProbeRule {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var out []managedProbeRule
+	for _, raw := range in {
+		if !raw.Enabled {
+			continue
+		}
+		rid := strings.TrimSpace(raw.RuleID)
+		if rid == "" {
+			logger.Warn("ignore probe rule with empty id")
+			continue
+		}
+		module := strings.TrimSpace(strings.ToLower(raw.Module))
+		switch module {
+		case "icmp":
+			// keep
+		case "tcp", "tcp_connect":
+			module = "tcp_connect"
+		default:
+			logger.Warn("ignore probe rule with invalid module", "rule_id", rid, "module", raw.Module)
+			continue
+		}
+		target := strings.TrimSpace(raw.Target)
+		if target == "" {
+			logger.Warn("ignore probe rule with empty target", "rule_id", rid)
+			continue
+		}
+		if module == "tcp_connect" {
+			if _, _, err := net.SplitHostPort(target); err != nil {
+				logger.Warn("ignore probe rule with invalid tcp target", "rule_id", rid, "target", target, "err", err)
+				continue
+			}
+		}
+
+		intervalSec := raw.IntervalSeconds
+		if intervalSec <= 0 {
+			intervalSec = 30
+		}
+		timeout := defaultTimeout
+		if raw.TimeoutMs > 0 {
+			timeout = time.Duration(raw.TimeoutMs) * time.Millisecond
+		}
+		if timeout <= 0 {
+			timeout = 2 * time.Second
+		}
+
+		out = append(out, managedProbeRule{
+			RuleID:   rid,
+			Module:   module,
+			Target:   target,
+			Interval: time.Duration(intervalSec) * time.Second,
+			Timeout:  timeout,
+		})
+	}
+	return out
 }
 
 func newManagedLabelState() *managedLabelState {
@@ -686,8 +832,9 @@ func collectAndPushProbes(
 	timeout time.Duration,
 	icmpTargets []string,
 	tcpTargets []string,
+	managedTargets []probe.Target,
 ) error {
-	if len(icmpTargets) == 0 && len(tcpTargets) == 0 {
+	if len(icmpTargets) == 0 && len(tcpTargets) == 0 && len(managedTargets) == 0 {
 		return nil
 	}
 	probeReg := prometheus.NewRegistry()
@@ -696,6 +843,7 @@ func collectAndPushProbes(
 		Timeout: timeout,
 		ICMP:    icmpTargets,
 		TCP:     tcpTargets,
+		Targets: managedTargets,
 	}))
 
 	mfs, err := probeReg.Gather()

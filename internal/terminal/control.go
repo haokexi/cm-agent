@@ -40,6 +40,8 @@ type AgentConfig struct {
 
 	// OnSyncLabels applies dynamic labels pushed from server over control WS.
 	OnSyncLabels func(map[string]string, int64) error
+	// OnSyncProbes applies dynamic probe rules pushed from server over control WS.
+	OnSyncProbes func([]ProbeRule, int64) error
 }
 
 func RunAgent(ctx context.Context, cfg AgentConfig) error {
@@ -176,6 +178,16 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				cfg.Logger.Warn("apply sync labels failed", "err", err)
 			} else {
 				cfg.Logger.Info("applied sync labels", "labels", len(msg.Labels), "version", msg.Version)
+			}
+			continue
+		case "sync_probes":
+			if cfg.OnSyncProbes == nil {
+				continue
+			}
+			if err := cfg.OnSyncProbes(msg.Probes, msg.Version); err != nil {
+				cfg.Logger.Warn("apply sync probes failed", "err", err)
+			} else {
+				cfg.Logger.Info("applied sync probes", "rules", len(msg.Probes), "version", msg.Version)
 			}
 			continue
 		case "open_terminal":

@@ -20,6 +20,9 @@ type ControlMessage struct {
 	Labels  map[string]string `json:"labels,omitempty"`
 	Version int64             `json:"version,omitempty"`
 
+	// Used by sync_probes control message.
+	Probes []ProbeRule `json:"probes,omitempty"`
+
 	// Used by network_test control message.
 	TestID          string `json:"test_id,omitempty"`
 	RootTestID      string `json:"root_test_id,omitempty"`
@@ -30,6 +33,15 @@ type ControlMessage struct {
 	DurationSeconds int    `json:"duration_seconds,omitempty"`
 	Parallel        int    `json:"parallel,omitempty"`
 	Protocol        string `json:"protocol,omitempty"` // currently tcp
+}
+
+type ProbeRule struct {
+	RuleID          string `json:"rule_id,omitempty"`
+	Module          string `json:"module,omitempty"` // icmp | tcp_connect
+	Target          string `json:"target,omitempty"` // host or host:port
+	IntervalSeconds int    `json:"interval_seconds,omitempty"`
+	TimeoutMs       int    `json:"timeout_ms,omitempty"`
+	Enabled         bool   `json:"enabled,omitempty"`
 }
 
 type ResizeMessage struct {

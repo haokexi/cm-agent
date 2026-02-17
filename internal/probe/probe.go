@@ -19,6 +19,14 @@ type Config struct {
 	Timeout time.Duration
 	ICMP    []string
 	TCP     []string
+	Targets []Target
+}
+
+type Target struct {
+	Module   string
+	Instance string
+	RuleID   string
+	Timeout  time.Duration
 }
 
 // Collector runs "blackbox-like" probes (ICMP ping and TCP connect) and emits results as metrics.
@@ -40,7 +48,7 @@ func NewCollector(cfg Config) *Collector {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	labels := []string{"module", "instance"}
+	labels := []string{"module", "instance", "probe_rule_id"}
 	return &Collector{
 		cfg: cfg,
 		descSuccess: prometheus.NewDesc(
@@ -78,49 +86,85 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
-	timeout := c.cfg.Timeout
 	logger := c.cfg.Logger
+	targets := c.buildTargets()
 
+	for _, item := range targets {
+		module := strings.TrimSpace(item.Module)
+		tgt := strings.TrimSpace(item.Instance)
+		if module == "" || tgt == "" {
+			continue
+		}
+		ruleID := strings.TrimSpace(item.RuleID)
+		if ruleID == "" {
+			ruleID = "0"
+		}
+		timeout := item.Timeout
+		if timeout <= 0 {
+			timeout = c.cfg.Timeout
+		}
+		start := time.Now()
+		switch module {
+		case "icmp":
+			rtt, err := pingOnce(tgt, timeout)
+			d := time.Since(start)
+			if err != nil {
+				logger.Debug("probe failed", "module", module, "target", tgt, "rule_id", ruleID, "err", err)
+				ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt, ruleID)
+				ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
+				continue
+			}
+			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt, ruleID)
+			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
+			ch <- prometheus.MustNewConstMetric(c.descICMPRTT, prometheus.GaugeValue, rtt.Seconds(), module, tgt, ruleID)
+		case "tcp_connect":
+			cd, err := tcpConnectOnce(tgt, timeout)
+			d := time.Since(start)
+			if err != nil {
+				logger.Debug("probe failed", "module", module, "target", tgt, "rule_id", ruleID, "err", err)
+				ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt, ruleID)
+				ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
+				continue
+			}
+			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt, ruleID)
+			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
+			ch <- prometheus.MustNewConstMetric(c.descTCPConn, prometheus.GaugeValue, cd.Seconds(), module, tgt, ruleID)
+		default:
+			continue
+		}
+	}
+}
+
+func (c *Collector) buildTargets() []Target {
+	var out []Target
+	if len(c.cfg.Targets) > 0 {
+		out = append(out, c.cfg.Targets...)
+	}
 	for _, tgt := range c.cfg.ICMP {
-		tgt = strings.TrimSpace(tgt)
-		if tgt == "" {
+		t := strings.TrimSpace(tgt)
+		if t == "" {
 			continue
 		}
-		module := "icmp"
-		start := time.Now()
-		rtt, err := pingOnce(tgt, timeout)
-		d := time.Since(start)
-
-		if err != nil {
-			logger.Debug("probe failed", "module", module, "target", tgt, "err", err)
-			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt)
-			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt)
-			continue
-		}
-		ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt)
-		ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt)
-		ch <- prometheus.MustNewConstMetric(c.descICMPRTT, prometheus.GaugeValue, rtt.Seconds(), module, tgt)
+		out = append(out, Target{
+			Module:   "icmp",
+			Instance: t,
+			RuleID:   "0",
+			Timeout:  c.cfg.Timeout,
+		})
 	}
-
 	for _, tgt := range c.cfg.TCP {
-		tgt = strings.TrimSpace(tgt)
-		if tgt == "" {
+		t := strings.TrimSpace(tgt)
+		if t == "" {
 			continue
 		}
-		module := "tcp_connect"
-		start := time.Now()
-		cd, err := tcpConnectOnce(tgt, timeout)
-		d := time.Since(start)
-		if err != nil {
-			logger.Debug("probe failed", "module", module, "target", tgt, "err", err)
-			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt)
-			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt)
-			continue
-		}
-		ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt)
-		ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt)
-		ch <- prometheus.MustNewConstMetric(c.descTCPConn, prometheus.GaugeValue, cd.Seconds(), module, tgt)
+		out = append(out, Target{
+			Module:   "tcp_connect",
+			Instance: t,
+			RuleID:   "0",
+			Timeout:  c.cfg.Timeout,
+		})
 	}
+	return out
 }
 
 func tcpConnectOnce(target string, timeout time.Duration) (time.Duration, error) {

@@ -23,10 +23,11 @@ type Config struct {
 }
 
 type Target struct {
-	Module   string
-	Instance string
-	RuleID   string
-	Timeout  time.Duration
+	Module     string
+	Instance   string
+	IPProtocol string
+	RuleID     string
+	Timeout    time.Duration
 }
 
 // Collector runs "blackbox-like" probes (ICMP ping and TCP connect) and emits results as metrics.
@@ -106,7 +107,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		start := time.Now()
 		switch module {
 		case "icmp":
-			rtt, err := pingOnce(tgt, timeout)
+			rtt, err := pingOnce(tgt, timeout, item.IPProtocol)
 			d := time.Since(start)
 			if err != nil {
 				logger.Debug("probe failed", "module", module, "target", tgt, "rule_id", ruleID, "err", err)
@@ -146,10 +147,11 @@ func (c *Collector) buildTargets() []Target {
 			continue
 		}
 		out = append(out, Target{
-			Module:   "icmp",
-			Instance: t,
-			RuleID:   "0",
-			Timeout:  c.cfg.Timeout,
+			Module:     "icmp",
+			Instance:   t,
+			IPProtocol: "auto",
+			RuleID:     "0",
+			Timeout:    c.cfg.Timeout,
 		})
 	}
 	for _, tgt := range c.cfg.TCP {
@@ -181,19 +183,50 @@ func tcpConnectOnce(target string, timeout time.Duration) (time.Duration, error)
 	return time.Since(start), nil
 }
 
-func pingOnce(target string, timeout time.Duration) (time.Duration, error) {
-	ipaddr, err := net.ResolveIPAddr("ip", target)
-	if err != nil {
-		return 0, err
-	}
-	if ipaddr.IP == nil {
-		return 0, errors.New("no ip resolved")
-	}
-
-	if ipaddr.IP.To4() != nil {
+func pingOnce(target string, timeout time.Duration, ipProtocol string) (time.Duration, error) {
+	switch normalizeIPProtocol(ipProtocol) {
+	case "ipv4":
+		ipaddr, err := net.ResolveIPAddr("ip4", target)
+		if err != nil {
+			return 0, err
+		}
+		if ipaddr.IP == nil {
+			return 0, errors.New("no ipv4 resolved")
+		}
 		return pingIPv4(ipaddr, timeout)
+	case "ipv6":
+		ipaddr, err := net.ResolveIPAddr("ip6", target)
+		if err != nil {
+			return 0, err
+		}
+		if ipaddr.IP == nil {
+			return 0, errors.New("no ipv6 resolved")
+		}
+		return pingIPv6(ipaddr, timeout)
+	default:
+		ipaddr, err := net.ResolveIPAddr("ip", target)
+		if err != nil {
+			return 0, err
+		}
+		if ipaddr.IP == nil {
+			return 0, errors.New("no ip resolved")
+		}
+		if ipaddr.IP.To4() != nil {
+			return pingIPv4(ipaddr, timeout)
+		}
+		return pingIPv6(ipaddr, timeout)
 	}
-	return pingIPv6(ipaddr, timeout)
+}
+
+func normalizeIPProtocol(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "ipv4", "ip4":
+		return "ipv4"
+	case "ipv6", "ip6":
+		return "ipv6"
+	default:
+		return "auto"
+	}
 }
 
 func pingIPv4(dst *net.IPAddr, timeout time.Duration) (time.Duration, error) {

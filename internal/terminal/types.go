@@ -37,8 +37,9 @@ type ControlMessage struct {
 
 type ProbeRule struct {
 	RuleID          string `json:"rule_id,omitempty"`
-	Module          string `json:"module,omitempty"` // icmp | tcp_connect
-	Target          string `json:"target,omitempty"` // host or host:port
+	Module          string `json:"module,omitempty"`      // icmp | tcp_connect
+	Target          string `json:"target,omitempty"`      // host or host:port
+	IPProtocol      string `json:"ip_protocol,omitempty"` // auto | ipv4 | ipv6 (icmp only)
 	IntervalSeconds int    `json:"interval_seconds,omitempty"`
 	TimeoutMs       int    `json:"timeout_ms,omitempty"`
 	Enabled         bool   `json:"enabled,omitempty"`

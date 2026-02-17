@@ -519,11 +519,12 @@ type managedLabelState struct {
 }
 
 type managedProbeRule struct {
-	RuleID   string
-	Module   string
-	Target   string
-	Interval time.Duration
-	Timeout  time.Duration
+	RuleID     string
+	Module     string
+	Target     string
+	IPProtocol string
+	Interval   time.Duration
+	Timeout    time.Duration
 }
 
 type managedProbeState struct {
@@ -583,10 +584,11 @@ func (s *managedProbeState) DueTargets(now time.Time) []probe.Target {
 		}
 		s.lastRun[rid] = now
 		out = append(out, probe.Target{
-			Module:   rule.Module,
-			Instance: rule.Target,
-			RuleID:   rid,
-			Timeout:  rule.Timeout,
+			Module:     rule.Module,
+			Instance:   rule.Target,
+			IPProtocol: rule.IPProtocol,
+			RuleID:     rid,
+			Timeout:    rule.Timeout,
 		})
 	}
 	return out
@@ -621,6 +623,11 @@ func normalizeManagedProbeRules(in []terminal.ProbeRule, defaultTimeout time.Dur
 			logger.Warn("ignore probe rule with empty target", "rule_id", rid)
 			continue
 		}
+
+		ipProtocol := "auto"
+		if module == "icmp" {
+			ipProtocol = normalizeProbeIPProtocol(raw.IPProtocol)
+		}
 		if module == "tcp_connect" {
 			if _, _, err := net.SplitHostPort(target); err != nil {
 				logger.Warn("ignore probe rule with invalid tcp target", "rule_id", rid, "target", target, "err", err)
@@ -641,14 +648,26 @@ func normalizeManagedProbeRules(in []terminal.ProbeRule, defaultTimeout time.Dur
 		}
 
 		out = append(out, managedProbeRule{
-			RuleID:   rid,
-			Module:   module,
-			Target:   target,
-			Interval: time.Duration(intervalSec) * time.Second,
-			Timeout:  timeout,
+			RuleID:     rid,
+			Module:     module,
+			Target:     target,
+			IPProtocol: ipProtocol,
+			Interval:   time.Duration(intervalSec) * time.Second,
+			Timeout:    timeout,
 		})
 	}
 	return out
+}
+
+func normalizeProbeIPProtocol(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "ipv4", "ip4":
+		return "ipv4"
+	case "ipv6", "ip6":
+		return "ipv6"
+	default:
+		return "auto"
+	}
 }
 
 func newManagedLabelState() *managedLabelState {

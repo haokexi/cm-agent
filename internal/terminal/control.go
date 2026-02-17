@@ -117,6 +117,12 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 	// keepalive ping
 	pingCtx, pingCancel := context.WithCancel(ctx)
 	defer pingCancel()
+	var wsWriteMu sync.Mutex
+	writeJSON := func(v any) error {
+		wsWriteMu.Lock()
+		defer wsWriteMu.Unlock()
+		return ws.WriteJSON(v)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -129,7 +135,9 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 			case <-pingCtx.Done():
 				return
 			case <-t.C:
+				wsWriteMu.Lock()
 				_ = ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
+				wsWriteMu.Unlock()
 			}
 		}
 	}()
@@ -172,6 +180,14 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 			continue
 		case "open_terminal":
 			// continue below
+		case "network_test":
+			go func(m ControlMessage) {
+				res := runNetworkTestTask(ctx, cfg, m)
+				if err := writeJSON(res); err != nil {
+					cfg.Logger.Warn("send network test result failed", "test_id", m.TestID, "err", err)
+				}
+			}(msg)
+			continue
 		default:
 			continue
 		}

@@ -182,7 +182,11 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 			// continue below
 		case "network_test":
 			go func(m ControlMessage) {
-				res := runNetworkTestTask(ctx, cfg, m)
+				res := runNetworkTestTask(ctx, cfg, m, func(p NetworkTestProgressMessage) {
+					if err := writeJSON(p); err != nil {
+						cfg.Logger.Warn("send network test progress failed", "test_id", m.TestID, "err", err)
+					}
+				})
 				if err := writeJSON(res); err != nil {
 					cfg.Logger.Warn("send network test result failed", "test_id", m.TestID, "err", err)
 				}

@@ -33,6 +33,7 @@ type ControlMessage struct {
 	DurationSeconds int    `json:"duration_seconds,omitempty"`
 	Parallel        int    `json:"parallel,omitempty"`
 	Protocol        string `json:"protocol,omitempty"` // currently tcp
+	Reverse         bool   `json:"reverse,omitempty"`  // client uses -R flag
 }
 
 type ProbeRule struct {

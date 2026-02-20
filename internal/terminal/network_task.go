@@ -68,7 +68,7 @@ func runNetworkTestTask(
 	case "server":
 		return runIperfServer(ctx, res)
 	case "client":
-		return runIperfClient(ctx, res, emit)
+		return runIperfClient(ctx, res, msg.Reverse, emit)
 	default:
 		res.Error = "invalid role"
 		return res
@@ -89,6 +89,7 @@ func runIperfServer(ctx context.Context, res NetworkTestResultMessage) NetworkTe
 func runIperfClient(
 	ctx context.Context,
 	res NetworkTestResultMessage,
+	reverse bool,
 	emit func(NetworkTestProgressMessage),
 ) NetworkTestResultMessage {
 	if strings.TrimSpace(res.TargetHost) == "" {
@@ -102,6 +103,9 @@ func runIperfClient(
 		"-t", fmt.Sprintf("%d", res.DurationSeconds),
 		"-P", fmt.Sprintf("%d", res.Parallel),
 		"-i", "1",
+	}
+	if reverse {
+		args = append(args, "-R")
 	}
 	cmd := exec.CommandContext(ctx, "iperf3", args...)
 

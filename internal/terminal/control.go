@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"cm-agent/internal/netrate"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -116,6 +118,10 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 
 	cfg.Logger.Info("terminal control connected")
 
+	// Network rate streamer – lifecycle tied to this WS connection.
+	rateStreamer := netrate.New(cfg.Logger.With("component", "netrate"))
+	defer rateStreamer.Stop()
+
 	// keepalive ping
 	pingCtx, pingCancel := context.WithCancel(ctx)
 	defer pingCancel()
@@ -203,6 +209,21 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 					cfg.Logger.Warn("send network test result failed", "test_id", m.TestID, "err", err)
 				}
 			}(msg)
+			continue
+		case "start_network_rate_stream":
+			rateStreamer.Start(func(snap netrate.Snapshot) {
+				wrapped := map[string]any{
+					"type":         "network_rate",
+					"timestamp_ms": snap.TimestampMs,
+					"rates":        snap.Rates,
+				}
+				if err := writeJSON(wrapped); err != nil {
+					cfg.Logger.Warn("send network rate failed", "err", err)
+				}
+			})
+			continue
+		case "stop_network_rate_stream":
+			rateStreamer.Stop()
 			continue
 		default:
 			continue

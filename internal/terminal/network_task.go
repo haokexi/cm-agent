@@ -1,30 +1,13 @@
 package terminal
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
-	"os/exec"
-	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"cm-agent/internal/speedtest"
 )
-
-var iperfIntervalLineRE = regexp.MustCompile(`^\[\s*(SUM|\d+)\]\s+([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)\s+sec\s+([0-9]+(?:\.[0-9]+)?)\s+([KMGTP]?Bytes)\s+([0-9]+(?:\.[0-9]+)?)\s+([KMGTP]?bits/sec)(?:\s+([0-9]+))?(?:\s+(sender|receiver))?.*$`)
-
-type iperfParsedLine struct {
-	StreamID      string
-	IntervalStart float64
-	IntervalEnd   float64
-	Bytes         int64
-	BitsPerSecond float64
-	Retransmits   int64
-	IsSummary     bool
-	SummaryRole   string // sender | receiver
-}
 
 func runNetworkTestTask(
 	parent context.Context,
@@ -66,122 +49,79 @@ func runNetworkTestTask(
 
 	switch role {
 	case "server":
-		return runIperfServer(ctx, res)
+		return runBuiltinServer(ctx, res)
 	case "client":
-		return runIperfClient(ctx, res, msg.Reverse, emit)
+		return runBuiltinClient(ctx, res, msg.Reverse, emit)
 	default:
 		res.Error = "invalid role"
 		return res
 	}
 }
 
-func runIperfServer(ctx context.Context, res NetworkTestResultMessage) NetworkTestResultMessage {
-	cmd := exec.CommandContext(ctx, "iperf3", "-s", "-1", "-p", fmt.Sprintf("%d", res.Port))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		res.Error = buildCommandError(err, out)
+func runBuiltinServer(ctx context.Context, res NetworkTestResultMessage) NetworkTestResultMessage {
+	if err := speedtest.RunServer(ctx, res.Port); err != nil {
+		res.Error = "server failed: " + err.Error()
 		return res
 	}
 	res.Success = true
 	return res
 }
 
-func runIperfClient(
+func runBuiltinClient(
 	ctx context.Context,
 	res NetworkTestResultMessage,
 	reverse bool,
 	emit func(NetworkTestProgressMessage),
 ) NetworkTestResultMessage {
-	if strings.TrimSpace(res.TargetHost) == "" {
+	host := strings.TrimSpace(res.TargetHost)
+	if host == "" {
 		res.Error = "target_host is required for client role"
 		return res
 	}
 
-	args := []string{
-		"-c", strings.TrimSpace(res.TargetHost),
-		"-p", fmt.Sprintf("%d", res.Port),
-		"-t", fmt.Sprintf("%d", res.DurationSeconds),
-		"-P", fmt.Sprintf("%d", res.Parallel),
-		"-i", "1",
-	}
-	if reverse {
-		args = append(args, "-R")
-	}
-	cmd := exec.CommandContext(ctx, "iperf3", args...)
+	duration := time.Duration(res.DurationSeconds) * time.Second
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		res.Error = "open stdout pipe failed: " + err.Error()
-		return res
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		res.Error = "open stderr pipe failed: " + err.Error()
-		return res
-	}
-	if err := cmd.Start(); err != nil {
-		res.Error = "start iperf3 failed: " + err.Error()
-		return res
-	}
-
-	linesCh := make(chan string, 128)
-	var scanWG sync.WaitGroup
-	scanWG.Add(2)
-	go scanIperfLines(stdout, linesCh, &scanWG)
-	go scanIperfLines(stderr, linesCh, &scanWG)
-	go func() {
-		scanWG.Wait()
-		close(linesCh)
-	}()
-
-	var tail []string
-	appendTail := func(line string) {
-		if strings.TrimSpace(line) == "" {
-			return
+	var onInterval func(speedtest.IntervalReport)
+	if emit != nil {
+		onInterval = func(r speedtest.IntervalReport) {
+			raw := fmt.Sprintf("  [SUM]  %.1f-%.1f sec  %s  %s",
+				r.IntervalStart, r.IntervalEnd,
+				fmtBytes(r.Bytes), fmtBitsPerSec(r.BitsPerSec))
+			emit(NetworkTestProgressMessage{
+				Type:             "network_test_progress",
+				TestID:           res.TestID,
+				RootTestID:       res.RootTestID,
+				Direction:        res.Direction,
+				Role:             res.Role,
+				Protocol:         res.Protocol,
+				TargetHost:       res.TargetHost,
+				Port:             res.Port,
+				DurationSeconds:  res.DurationSeconds,
+				Parallel:         res.Parallel,
+				IntervalStartSec: r.IntervalStart,
+				IntervalEndSec:   r.IntervalEnd,
+				BitsPerSecond:    r.BitsPerSec,
+				Bytes:            r.Bytes,
+				IsSummary:        false,
+				RawLine:          raw,
+				TimestampMs:      time.Now().UnixMilli(),
+			})
 		}
-		if len(tail) >= 120 {
-			tail = tail[1:]
-		}
-		tail = append(tail, line)
 	}
 
-	var lastInterval *iperfParsedLine
-	var senderSummary *iperfParsedLine
-	var receiverSummary *iperfParsedLine
-	var summaryLine string
+	result := speedtest.RunClient(ctx, host, res.Port, duration, res.Parallel, reverse, onInterval)
 
-	for line := range linesCh {
-		appendTail(line)
-		parsed, ok := parseIperfIntervalLine(line)
-		if !ok {
-			continue
-		}
-		// For multi-stream tests, emit only SUM lines to avoid noisy duplicates.
-		if res.Parallel > 1 && strings.ToUpper(parsed.StreamID) != "SUM" {
-			continue
-		}
+	res.Success = result.Success
+	res.Error = result.Error
+	res.BitsPerSecond = result.BitsPerSec
+	res.Bytes = result.TotalBytes
 
-		if parsed.IsSummary {
-			cp := parsed
-			switch strings.ToLower(parsed.SummaryRole) {
-			case "sender":
-				senderSummary = &cp
-				summaryLine = line
-			case "receiver":
-				receiverSummary = &cp
-				if summaryLine == "" {
-					summaryLine = line
-				}
-			default:
-				if summaryLine == "" {
-					summaryLine = line
-				}
-			}
-		} else {
-			cp := parsed
-			lastInterval = &cp
-		}
+	if result.Success {
+		res.SummaryLine = fmt.Sprintf("  [SUM]  0.0-%.1f sec  %s  %s  sender",
+			result.Duration.Seconds(),
+			fmtBytes(result.TotalBytes), fmtBitsPerSec(result.BitsPerSec))
 
+		// Emit final summary as progress.
 		if emit != nil {
 			emit(NetworkTestProgressMessage{
 				Type:             "network_test_progress",
@@ -194,152 +134,44 @@ func runIperfClient(
 				Port:             res.Port,
 				DurationSeconds:  res.DurationSeconds,
 				Parallel:         res.Parallel,
-				IntervalStartSec: parsed.IntervalStart,
-				IntervalEndSec:   parsed.IntervalEnd,
-				BitsPerSecond:    parsed.BitsPerSecond,
-				Bytes:            parsed.Bytes,
-				Retransmits:      parsed.Retransmits,
-				IsSummary:        parsed.IsSummary,
-				RawLine:          line,
+				IntervalStartSec: 0,
+				IntervalEndSec:   result.Duration.Seconds(),
+				BitsPerSecond:    result.BitsPerSec,
+				Bytes:            result.TotalBytes,
+				IsSummary:        true,
+				RawLine:          res.SummaryLine,
 				TimestampMs:      time.Now().UnixMilli(),
 			})
 		}
 	}
 
-	if err := cmd.Wait(); err != nil {
-		res.Error = buildCommandError(err, []byte(strings.Join(tail, "\n")))
-		return res
-	}
-
-	switch {
-	case senderSummary != nil:
-		res.BitsPerSecond = senderSummary.BitsPerSecond
-		res.Bytes = senderSummary.Bytes
-		res.Retransmits = senderSummary.Retransmits
-	case receiverSummary != nil:
-		res.BitsPerSecond = receiverSummary.BitsPerSecond
-		res.Bytes = receiverSummary.Bytes
-		res.Retransmits = receiverSummary.Retransmits
-	case lastInterval != nil:
-		res.BitsPerSecond = lastInterval.BitsPerSecond
-		res.Bytes = lastInterval.Bytes
-		res.Retransmits = lastInterval.Retransmits
-	}
-	res.SummaryLine = summaryLine
-	res.Success = true
 	return res
 }
 
-func scanIperfLines(r io.Reader, out chan<- string, wg *sync.WaitGroup) {
-	defer wg.Done()
-	sc := bufio.NewScanner(r)
-	buf := make([]byte, 0, 64*1024)
-	sc.Buffer(buf, 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		out <- line
-	}
-	if err := sc.Err(); err != nil {
-		out <- "scan iperf output failed: " + err.Error()
-	}
-}
-
-func parseIperfIntervalLine(line string) (iperfParsedLine, bool) {
-	m := iperfIntervalLineRE.FindStringSubmatch(strings.TrimSpace(line))
-	if len(m) != 10 {
-		return iperfParsedLine{}, false
-	}
-
-	start, err := strconv.ParseFloat(m[2], 64)
-	if err != nil {
-		return iperfParsedLine{}, false
-	}
-	end, err := strconv.ParseFloat(m[3], 64)
-	if err != nil {
-		return iperfParsedLine{}, false
-	}
-	transfer, err := strconv.ParseFloat(m[4], 64)
-	if err != nil {
-		return iperfParsedLine{}, false
-	}
-	bitrate, err := strconv.ParseFloat(m[6], 64)
-	if err != nil {
-		return iperfParsedLine{}, false
-	}
-
-	var retransmits int64
-	if strings.TrimSpace(m[8]) != "" {
-		r, err := strconv.ParseInt(m[8], 10, 64)
-		if err == nil {
-			retransmits = r
-		}
-	}
-
-	duration := end - start
-	summaryRole := strings.ToLower(strings.TrimSpace(m[9]))
-	isSummary := summaryRole != "" || duration > 1.5
-
-	return iperfParsedLine{
-		StreamID:      strings.ToUpper(strings.TrimSpace(m[1])),
-		IntervalStart: start,
-		IntervalEnd:   end,
-		Bytes:         int64(transfer * byteUnitScale(m[5])),
-		BitsPerSecond: bitrate * bitUnitScale(m[7]),
-		Retransmits:   retransmits,
-		IsSummary:     isSummary,
-		SummaryRole:   summaryRole,
-	}, true
-}
-
-func byteUnitScale(unit string) float64 {
-	switch strings.ToLower(strings.TrimSpace(unit)) {
-	case "bytes":
-		return 1
-	case "kbytes":
-		return 1e3
-	case "mbytes":
-		return 1e6
-	case "gbytes":
-		return 1e9
-	case "tbytes":
-		return 1e12
+func fmtBytes(b int64) string {
+	switch {
+	case b >= 1e9:
+		return fmt.Sprintf("%.1f GBytes", float64(b)/1e9)
+	case b >= 1e6:
+		return fmt.Sprintf("%.1f MBytes", float64(b)/1e6)
+	case b >= 1e3:
+		return fmt.Sprintf("%.0f KBytes", float64(b)/1e3)
 	default:
-		return 1
+		return fmt.Sprintf("%d Bytes", b)
 	}
 }
 
-func bitUnitScale(unit string) float64 {
-	switch strings.ToLower(strings.TrimSpace(unit)) {
-	case "bits/sec":
-		return 1
-	case "kbits/sec":
-		return 1e3
-	case "mbits/sec":
-		return 1e6
-	case "gbits/sec":
-		return 1e9
-	case "tbits/sec":
-		return 1e12
+func fmtBitsPerSec(bps float64) string {
+	switch {
+	case bps >= 1e9:
+		return fmt.Sprintf("%.2f Gbits/sec", bps/1e9)
+	case bps >= 1e6:
+		return fmt.Sprintf("%.1f Mbits/sec", bps/1e6)
+	case bps >= 1e3:
+		return fmt.Sprintf("%.0f Kbits/sec", bps/1e3)
 	default:
-		return 1
+		return fmt.Sprintf("%.0f bits/sec", bps)
 	}
-}
-
-func buildCommandError(err error, raw []byte) string {
-	if err == nil {
-		return ""
-	}
-	msg := strings.TrimSpace(string(raw))
-	if msg == "" {
-		return err.Error()
-	}
-	if len(msg) > 400 {
-		msg = msg[:400]
-	}
-	return err.Error() + ": " + msg
 }
 
 func nonEmpty(v, fallback string) string {

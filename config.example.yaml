@@ -22,6 +22,7 @@ remote_write:
   max_series_per_request: 2000
 
   spool:
+    enabled: false
     dir: "./spool"
     max_bytes: 104857600 # 100 MiB
     max_files: 2000

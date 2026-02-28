@@ -38,6 +38,7 @@ type Config struct {
 		MaxSeriesPerRequest int      `yaml:"max_series_per_request"`
 
 		Spool struct {
+			Enabled  bool   `yaml:"enabled"`
 			Dir      string `yaml:"dir"`
 			MaxBytes int64  `yaml:"max_bytes"`
 			MaxFiles int    `yaml:"max_files"`

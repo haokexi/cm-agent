@@ -55,6 +55,10 @@ func main() {
 			"remoteWrite.max-series-per-request",
 			"Max timeseries per request. Used to split large pushes.",
 		).Envar("CM_REMOTE_WRITE_MAX_SERIES_PER_REQUEST").Default("2000").Int()
+		spoolEnabled = kingpin.Flag(
+			"remoteWrite.spool.enabled",
+			"Enable disk spool for buffering failed remote_write payloads.",
+		).Envar("CM_REMOTE_WRITE_SPOOL_ENABLED").Default("false").Bool()
 		spoolDir = kingpin.Flag(
 			"remoteWrite.spool.dir",
 			"Directory for remote_write disk spool.",
@@ -189,7 +193,7 @@ func main() {
 	applyConfigDefaults(
 		loadedCfg,
 		rwURL, rwBearer, timeout, maxSeriesPerReq,
-		spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
+		spoolEnabled, spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
 		terminalEnabled, terminalServer, terminalContextPath, terminalAgentToken,
@@ -296,7 +300,7 @@ func main() {
 	})
 
 	var diskSpool *spool.Spool
-	if *spoolMaxBytes > 0 && strings.TrimSpace(*spoolDir) != "" {
+	if *spoolEnabled && *spoolMaxBytes > 0 && strings.TrimSpace(*spoolDir) != "" {
 		diskSpool, err = spool.New(*spoolDir, *spoolMaxBytes, *spoolMaxFiles)
 		if err != nil {
 			logger.Error("failed to init spool", "err", err)
@@ -707,6 +711,7 @@ func applyConfigDefaults(
 	rwURL, rwBearer *string,
 	timeout *time.Duration,
 	maxSeriesPerReq *int,
+	spoolEnabled *bool,
 	spoolDir *string,
 	spoolMaxBytes *int64,
 	spoolMaxFiles, flushMaxFiles *int,
@@ -749,6 +754,9 @@ func applyConfigDefaults(
 	}
 	if *maxSeriesPerReq == 2000 && cfg.RemoteWrite.MaxSeriesPerRequest > 0 {
 		*maxSeriesPerReq = cfg.RemoteWrite.MaxSeriesPerRequest
+	}
+	if !*spoolEnabled && cfg.RemoteWrite.Spool.Enabled {
+		*spoolEnabled = true
 	}
 	if *spoolDir == "./spool" && cfg.RemoteWrite.Spool.Dir != "" {
 		*spoolDir = cfg.RemoteWrite.Spool.Dir

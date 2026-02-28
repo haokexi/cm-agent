@@ -11,17 +11,19 @@ import (
 const MetricName = "cm_agent_node_info"
 
 type Collector struct {
-	desc *prometheus.Desc
+	desc    *prometheus.Desc
+	version string
 }
 
-func New() *Collector {
+func New(version string) *Collector {
 	return &Collector{
 		desc: prometheus.NewDesc(
 			MetricName,
-			"cm-agent node identity/network info (labels: ipv4, ipv6).",
-			[]string{"ipv4", "ipv6"},
+			"cm-agent node identity/network info (labels: ipv4, ipv6, agent_version).",
+			[]string{"ipv4", "ipv6", "agent_version"},
 			nil,
 		),
+		version: version,
 	}
 }
 
@@ -31,7 +33,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ipv4, ipv6 := pickIPs()
-	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, 1, ipv4, ipv6)
+	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, 1, ipv4, ipv6, c.version)
 }
 
 func pickIPs() (ipv4 string, ipv6 string) {

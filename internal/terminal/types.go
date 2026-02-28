@@ -34,6 +34,12 @@ type ControlMessage struct {
 	Parallel        int    `json:"parallel,omitempty"`
 	Protocol        string `json:"protocol,omitempty"` // currently tcp
 	Reverse         bool   `json:"reverse,omitempty"`  // client uses -R flag
+
+	// Used by upgrade_agent control message.
+	UpdateRequestID string `json:"update_request_id,omitempty"`
+	TargetVersion   string `json:"target_version,omitempty"` // empty/latest -> latest release
+	ReleaseRepo     string `json:"release_repo,omitempty"`   // owner/repo, fallback to agent default
+	GitHubProxy     string `json:"github_proxy,omitempty"`   // optional proxy prefix
 }
 
 type ProbeRule struct {
@@ -103,4 +109,20 @@ type NetworkTestProgressMessage struct {
 
 	RawLine     string `json:"raw_line,omitempty"`
 	TimestampMs int64  `json:"timestamp_ms,omitempty"`
+}
+
+type AgentUpdateResultMessage struct {
+	Type string `json:"type"` // agent_update_result
+
+	UpdateRequestID string `json:"update_request_id,omitempty"`
+	Success         bool   `json:"success"`
+	Error           string `json:"error,omitempty"`
+
+	FromVersion string `json:"from_version,omitempty"`
+	ToVersion   string `json:"to_version,omitempty"`
+	AssetName   string `json:"asset_name,omitempty"`
+	AssetURL    string `json:"asset_url,omitempty"`
+
+	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
 }

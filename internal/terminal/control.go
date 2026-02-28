@@ -9,11 +9,16 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cm-agent/internal/netrate"
+	"cm-agent/internal/selfupdate"
 
 	"github.com/gorilla/websocket"
 )
@@ -39,6 +44,10 @@ type AgentConfig struct {
 	MaxSessions int
 	MaxDuration time.Duration
 	IdleTimeout time.Duration
+
+	CurrentVersion    string
+	UpdateRepo        string
+	UpdateGitHubProxy string
 
 	// OnSyncLabels applies dynamic labels pushed from server over control WS.
 	OnSyncLabels func(map[string]string, int64) error
@@ -131,6 +140,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 		defer wsWriteMu.Unlock()
 		return ws.WriteJSON(v)
 	}
+	var updating atomic.Bool
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -210,6 +220,25 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				}
 			}(msg)
 			continue
+		case "upgrade_agent":
+			if !updating.CompareAndSwap(false, true) {
+				_ = writeJSON(AgentUpdateResultMessage{
+					Type:            "agent_update_result",
+					UpdateRequestID: msg.UpdateRequestID,
+					Success:         false,
+					Error:           "another update task is running",
+					FromVersion:     cfg.CurrentVersion,
+					ToVersion:       strings.TrimSpace(msg.TargetVersion),
+					StartedAtMs:     time.Now().UnixMilli(),
+					FinishedAtMs:    time.Now().UnixMilli(),
+				})
+				continue
+			}
+			go func(m ControlMessage) {
+				defer updating.Store(false)
+				handleUpgradeAgent(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
 		case "start_network_rate_stream":
 			rateStreamer.Start(func(snap netrate.Snapshot) {
 				wrapped := map[string]any{
@@ -268,4 +297,91 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 			}
 		}(msg)
 	}
+}
+
+func handleUpgradeAgent(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	startedAt := time.Now()
+	targetVersion := strings.TrimSpace(msg.TargetVersion)
+	updateRepo := strings.TrimSpace(msg.ReleaseRepo)
+	if updateRepo == "" {
+		updateRepo = strings.TrimSpace(cfg.UpdateRepo)
+	}
+	ghProxy := strings.TrimSpace(msg.GitHubProxy)
+	if ghProxy == "" {
+		ghProxy = strings.TrimSpace(cfg.UpdateGitHubProxy)
+	}
+
+	res, err := selfupdate.Apply(ctx, selfupdate.Config{
+		Logger:         cfg.Logger.With("component", "self-update"),
+		CurrentVersion: cfg.CurrentVersion,
+		TargetVersion:  targetVersion,
+		Repo:           updateRepo,
+		GitHubProxy:    ghProxy,
+	})
+
+	out := AgentUpdateResultMessage{
+		Type:            "agent_update_result",
+		UpdateRequestID: msg.UpdateRequestID,
+		Success:         err == nil || errors.Is(err, selfupdate.ErrAlreadyLatest),
+		FromVersion:     res.FromVersion,
+		ToVersion:       res.ToVersion,
+		AssetName:       res.AssetName,
+		AssetURL:        res.AssetURL,
+		StartedAtMs:     startedAt.UnixMilli(),
+		FinishedAtMs:    time.Now().UnixMilli(),
+	}
+	if err != nil && !errors.Is(err, selfupdate.ErrAlreadyLatest) {
+		out.Success = false
+		out.Error = err.Error()
+		cfg.Logger.Warn("self update failed", "err", err, "request_id", msg.UpdateRequestID)
+	} else {
+		cfg.Logger.Info("self update completed", "from", out.FromVersion, "to", out.ToVersion, "request_id", msg.UpdateRequestID)
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send update result failed", "err", err, "request_id", msg.UpdateRequestID)
+		return
+	}
+
+	if out.Success && !errors.Is(err, selfupdate.ErrAlreadyLatest) {
+		if rerr := restartSelf(); rerr != nil {
+			cfg.Logger.Warn("restart after self update failed", "err", rerr)
+		}
+	}
+}
+
+func restartSelf() error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+	if p, err := filepath.EvalSymlinks(exePath); err == nil && strings.TrimSpace(p) != "" {
+		exePath = p
+	}
+
+	// When managed by systemd, exit and let Restart=always recover.
+	if os.Getenv("INVOCATION_ID") != "" || os.Getenv("NOTIFY_SOCKET") != "" {
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			os.Exit(0)
+		}()
+		return nil
+	}
+
+	cmd := exec.Command(exePath, os.Args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawn new process: %w", err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		os.Exit(0)
+	}()
+	return nil
 }

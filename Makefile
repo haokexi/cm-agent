@@ -12,7 +12,13 @@ GO ?= go
 
 CGO_ENABLED ?= 0
 
-LDFLAGS := -s -w
+VERSION ?= dev
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+LDFLAGS := -s -w \
+	-X 'cm-agent/internal/buildinfo.Version=$(VERSION)' \
+	-X 'cm-agent/internal/buildinfo.Commit=$(COMMIT)' \
+	-X 'cm-agent/internal/buildinfo.BuildTime=$(BUILD_TIME)'
 
 help:
 	@echo "Targets:"

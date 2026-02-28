@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/node_exporter/collector"
 
 	"cm-agent/internal/agentinfo"
+	"cm-agent/internal/buildinfo"
 	"cm-agent/internal/config"
 	"cm-agent/internal/convert"
 	"cm-agent/internal/probe"
@@ -228,6 +229,11 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: parseLevel(*logLevel),
 	}))
+	logger.Info("starting cm-agent",
+		"version", buildinfo.VersionString(),
+		"commit", buildinfo.CommitString(),
+		"build_time", buildinfo.BuildTimeString(),
+	)
 
 	if *disableDefaultCollectors {
 		collector.DisableDefaultCollectors()
@@ -289,14 +295,14 @@ func main() {
 
 	internal := newInternalMetrics()
 	reg.MustRegister(internal)
-	reg.MustRegister(agentinfo.New())
+	reg.MustRegister(agentinfo.New(buildinfo.VersionString()))
 
 	rw := remotewrite.NewClient(remotewrite.Config{
 		URL:                 *rwURL,
 		BearerToken:         *rwBearer,
 		Timeout:             *timeout,
 		MaxSeriesPerRequest: *maxSeriesPerReq,
-		UserAgent:           "cm-agent/0.1",
+		UserAgent:           buildinfo.UserAgent(),
 	})
 
 	var diskSpool *spool.Spool
@@ -328,6 +334,8 @@ func main() {
 				MaxSessions:           *terminalMaxSessions,
 				MaxDuration:           *terminalMaxDuration,
 				IdleTimeout:           *terminalIdleTimeout,
+				CurrentVersion:        buildinfo.VersionString(),
+				UpdateRepo:            "haokexi/cm-agent",
 				OnSyncLabels: func(labels map[string]string, version int64) error {
 					normalized := make(map[string]string, len(labels))
 					for k, v := range labels {

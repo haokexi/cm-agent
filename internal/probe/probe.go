@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ func NewCollector(cfg Config) *Collector {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	labels := []string{"module", "instance", "probe_rule_id"}
+	labels := []string{"module", "instance", "probe_rule_id", "ipv4", "ipv6"}
 	return &Collector{
 		cfg: cfg,
 		descSuccess: prometheus.NewDesc(
@@ -96,6 +97,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		if module == "" || tgt == "" {
 			continue
 		}
+		ipv4Label, ipv6Label := resolveProbeIPs(module, tgt)
 		ruleID := strings.TrimSpace(item.RuleID)
 		if ruleID == "" {
 			ruleID = "0"
@@ -111,25 +113,25 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			d := time.Since(start)
 			if err != nil {
 				logger.Debug("probe failed", "module", module, "target", tgt, "rule_id", ruleID, "err", err)
-				ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt, ruleID)
-				ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
+				ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt, ruleID, ipv4Label, ipv6Label)
+				ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID, ipv4Label, ipv6Label)
 				continue
 			}
-			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt, ruleID)
-			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
-			ch <- prometheus.MustNewConstMetric(c.descICMPRTT, prometheus.GaugeValue, rtt.Seconds(), module, tgt, ruleID)
+			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt, ruleID, ipv4Label, ipv6Label)
+			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID, ipv4Label, ipv6Label)
+			ch <- prometheus.MustNewConstMetric(c.descICMPRTT, prometheus.GaugeValue, rtt.Seconds(), module, tgt, ruleID, ipv4Label, ipv6Label)
 		case "tcp_connect":
 			cd, err := tcpConnectOnce(tgt, timeout)
 			d := time.Since(start)
 			if err != nil {
 				logger.Debug("probe failed", "module", module, "target", tgt, "rule_id", ruleID, "err", err)
-				ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt, ruleID)
-				ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
+				ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 0, module, tgt, ruleID, ipv4Label, ipv6Label)
+				ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID, ipv4Label, ipv6Label)
 				continue
 			}
-			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt, ruleID)
-			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID)
-			ch <- prometheus.MustNewConstMetric(c.descTCPConn, prometheus.GaugeValue, cd.Seconds(), module, tgt, ruleID)
+			ch <- prometheus.MustNewConstMetric(c.descSuccess, prometheus.GaugeValue, 1, module, tgt, ruleID, ipv4Label, ipv6Label)
+			ch <- prometheus.MustNewConstMetric(c.descDuration, prometheus.GaugeValue, d.Seconds(), module, tgt, ruleID, ipv4Label, ipv6Label)
+			ch <- prometheus.MustNewConstMetric(c.descTCPConn, prometheus.GaugeValue, cd.Seconds(), module, tgt, ruleID, ipv4Label, ipv6Label)
 		default:
 			continue
 		}
@@ -227,6 +229,57 @@ func normalizeIPProtocol(raw string) string {
 	default:
 		return "auto"
 	}
+}
+
+func resolveProbeIPs(module, instance string) (ipv4Label string, ipv6Label string) {
+	host := strings.TrimSpace(instance)
+	if host == "" {
+		return "", ""
+	}
+	if strings.TrimSpace(module) == "tcp_connect" {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return "", ""
+	}
+
+	// Fast path for IP literals to avoid DNS.
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.Is4() {
+			return addr.String(), ""
+		}
+		if addr.Is6() {
+			return "", addr.String()
+		}
+		return "", ""
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return "", ""
+	}
+	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			if ipv4Label == "" {
+				ipv4Label = ip4.String()
+			}
+			continue
+		}
+		ip16 := ip.To16()
+		if ip16 != nil && ipv6Label == "" {
+			ipv6Label = ip16.String()
+		}
+		if ipv4Label != "" && ipv6Label != "" {
+			break
+		}
+	}
+	return ipv4Label, ipv6Label
 }
 
 func pingIPv4(dst *net.IPAddr, timeout time.Duration) (time.Duration, error) {

@@ -38,3 +38,12 @@ func TestParseLabelsRejectDuplicateKey(t *testing.T) {
 		t.Fatal("expected duplicate key error")
 	}
 }
+
+func TestIsManagedLabelKeyIgnored(t *testing.T) {
+	if !isManagedLabelKeyIgnored("agent_version") {
+		t.Fatal("agent_version should be ignored in managed labels")
+	}
+	if isManagedLabelKeyIgnored("tenant_id") {
+		t.Fatal("tenant_id should not be ignored in managed labels")
+	}
+}

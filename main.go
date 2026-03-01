@@ -347,6 +347,10 @@ func main() {
 					for k, v := range labels {
 						k = strings.TrimSpace(k)
 						v = strings.TrimSpace(v)
+						if isManagedLabelKeyIgnored(k) {
+							logger.Warn("ignore managed label key", "key", k)
+							continue
+						}
 						if err := validateLabelKV(k, v); err != nil {
 							return err
 						}
@@ -732,6 +736,10 @@ func cloneLabels(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func isManagedLabelKeyIgnored(k string) bool {
+	return k == "agent_version"
 }
 
 func waitForInitialSyncLabels(ctx context.Context, ready <-chan struct{}, timeout time.Duration) (waited bool, timedOut bool, err error) {

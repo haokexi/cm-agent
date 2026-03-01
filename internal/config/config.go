@@ -65,6 +65,7 @@ type Config struct {
 
 		DialTimeout           Duration `yaml:"dial_timeout"`
 		PingInterval          Duration `yaml:"ping_interval"`
+		SyncLabelsWaitTimeout Duration `yaml:"sync_labels_wait_timeout"`
 		TLSInsecureSkipVerify bool     `yaml:"tls_insecure_skip_verify"`
 
 		Shell     string   `yaml:"shell"`

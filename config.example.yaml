@@ -49,6 +49,7 @@ terminal:
   agent_token: "1:REPLACE_ME_LONG_LIVED"
   dial_timeout: 10s
   ping_interval: 30s
+  sync_labels_wait_timeout: 10s
   tls_insecure_skip_verify: false
   shell: "/bin/bash"
   shell_args: ["-l"]

@@ -153,6 +153,10 @@ func main() {
 			"terminal.ping-interval",
 			"Control/session WS keepalive ping interval.",
 		).Envar("CM_TERMINAL_PING_INTERVAL").Default("30s").Duration()
+		terminalSyncLabelsWaitTimeout = kingpin.Flag(
+			"terminal.sync-labels-wait-timeout",
+			"Wait timeout before first metrics push for initial sync_labels from server (0 to disable).",
+		).Envar("CM_TERMINAL_SYNC_LABELS_WAIT_TIMEOUT").Default("10s").Duration()
 		terminalTLSInsecure = kingpin.Flag(
 			"terminal.tls-insecure-skip-verify",
 			"Skip TLS verification for terminal/control websocket connections.",
@@ -198,7 +202,7 @@ func main() {
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
 		terminalEnabled, terminalServer, terminalContextPath, terminalAgentToken,
-		terminalDialTimeout, terminalPingInterval, terminalTLSInsecure, terminalShell, terminalShellArgs, terminalTerm,
+		terminalDialTimeout, terminalPingInterval, terminalSyncLabelsWaitTimeout, terminalTLSInsecure, terminalShell, terminalShellArgs, terminalTerm,
 		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
 	)
 
@@ -259,6 +263,8 @@ func main() {
 	}
 	managedLabels := newManagedLabelState()
 	managedProbes := newManagedProbeState()
+	firstSyncLabelsCh := make(chan struct{})
+	var firstSyncLabelsOnce sync.Once
 
 	buildLabelSets := func() (base []remotewrite.Label, probe []remotewrite.Label) {
 		merged := cloneLabels(staticExtraLabels)
@@ -347,6 +353,7 @@ func main() {
 						normalized[k] = v
 					}
 					managedLabels.Apply(normalized, version)
+					firstSyncLabelsOnce.Do(func() { close(firstSyncLabelsCh) })
 					return nil
 				},
 				OnSyncProbes: func(rules []terminal.ProbeRule, version int64) error {
@@ -363,6 +370,19 @@ func main() {
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
+
+	if *terminalEnabled {
+		waited, timedOut, waitErr := waitForInitialSyncLabels(ctx, firstSyncLabelsCh, *terminalSyncLabelsWaitTimeout)
+		switch {
+		case waitErr != nil:
+			logger.Warn("skip waiting for initial sync labels", "err", waitErr)
+		case waited && !timedOut:
+			logger.Info("initial sync labels applied before first push")
+		case waited && timedOut:
+			logger.Warn("timeout waiting for initial sync labels; continue without blocking startup",
+				"timeout", terminalSyncLabelsWaitTimeout.String())
+		}
+	}
 
 	// Push immediately on startup.
 	if _, err := flushSpool(ctx, logger, rw, diskSpool, *flushMaxFiles); err != nil {
@@ -714,6 +734,24 @@ func cloneLabels(in map[string]string) map[string]string {
 	return out
 }
 
+func waitForInitialSyncLabels(ctx context.Context, ready <-chan struct{}, timeout time.Duration) (waited bool, timedOut bool, err error) {
+	if timeout <= 0 {
+		return false, false, nil
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ready:
+		return true, false, nil
+	case <-timer.C:
+		return true, true, nil
+	case <-ctx.Done():
+		return false, false, ctx.Err()
+	}
+}
+
 func applyConfigDefaults(
 	cfg *config.Config,
 	rwURL, rwBearer *string,
@@ -739,6 +777,7 @@ func applyConfigDefaults(
 	terminalAgentToken *string,
 	terminalDialTimeout *time.Duration,
 	terminalPingInterval *time.Duration,
+	terminalSyncLabelsWaitTimeout *time.Duration,
 	terminalTLSInsecure *bool,
 	terminalShell *string,
 	terminalShellArgs *[]string,
@@ -834,6 +873,9 @@ func applyConfigDefaults(
 	}
 	if *terminalPingInterval == 30*time.Second && cfg.Terminal.PingInterval.Duration > 0 {
 		*terminalPingInterval = cfg.Terminal.PingInterval.Duration
+	}
+	if *terminalSyncLabelsWaitTimeout == 10*time.Second && cfg.Terminal.SyncLabelsWaitTimeout.Duration > 0 {
+		*terminalSyncLabelsWaitTimeout = cfg.Terminal.SyncLabelsWaitTimeout.Duration
 	}
 	if !*terminalTLSInsecure && cfg.Terminal.TLSInsecureSkipVerify {
 		*terminalTLSInsecure = true

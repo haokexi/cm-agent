@@ -120,6 +120,10 @@ func main() {
 			"probe.timeout",
 			"Timeout per probe (icmp or tcp).",
 		).Envar("CM_PROBE_TIMEOUT").Default("2s").Duration()
+		probeICMPCount = kingpin.Flag(
+			"probe.icmp-count",
+			"ICMP echo packets per probe round (used for packet-loss estimation).",
+		).Envar("CM_PROBE_ICMP_COUNT").Default("5").Int()
 		probeICMP = kingpin.Flag(
 			"probe.icmp",
 			"ICMP ping targets, repeatable (host or ip).",
@@ -200,7 +204,7 @@ func main() {
 		rwURL, rwBearer, timeout, maxSeriesPerReq,
 		spoolEnabled, spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
-		probeJob, probeTimeout, probeICMP, probeTCP,
+		probeJob, probeTimeout, probeICMPCount, probeICMP, probeTCP,
 		terminalEnabled, terminalServer, terminalContextPath, terminalAgentToken,
 		terminalDialTimeout, terminalPingInterval, terminalSyncLabelsWaitTimeout, terminalTLSInsecure, terminalShell, terminalShellArgs, terminalTerm,
 		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
@@ -398,7 +402,7 @@ func main() {
 	}
 	if err := collectAndPushProbes(
 		ctx, logger, rw, diskSpool, baseProbeLabels,
-		*probeTimeout, *probeICMP, *probeTCP, managedProbes.DueTargets(time.Now()),
+		*probeTimeout, *probeICMPCount, *probeICMP, *probeTCP, managedProbes.DueTargets(time.Now()),
 	); err != nil {
 		logger.Warn("initial probe push failed", "err", err)
 	}
@@ -418,7 +422,7 @@ func main() {
 			}
 			if err := collectAndPushProbes(
 				ctx, logger, rw, diskSpool, baseProbeLabels,
-				*probeTimeout, *probeICMP, *probeTCP, managedProbes.DueTargets(time.Now()),
+				*probeTimeout, *probeICMPCount, *probeICMP, *probeTCP, managedProbes.DueTargets(time.Now()),
 			); err != nil {
 				logger.Warn("probe push failed", "err", err)
 			}
@@ -777,6 +781,7 @@ func applyConfigDefaults(
 	logLevel *string,
 	probeJob *string,
 	probeTimeout *time.Duration,
+	probeICMPCount *int,
 	probeICMP *[]string,
 	probeTCP *[]string,
 	terminalEnabled *bool,
@@ -857,6 +862,9 @@ func applyConfigDefaults(
 	if *probeTimeout == 2*time.Second && cfg.Probes.Timeout.Duration > 0 {
 		*probeTimeout = cfg.Probes.Timeout.Duration
 	}
+	if *probeICMPCount == 5 && cfg.Probes.ICMPCount > 0 {
+		*probeICMPCount = cfg.Probes.ICMPCount
+	}
 	if len(*probeICMP) == 0 && len(cfg.Probes.ICMP) > 0 {
 		*probeICMP = append(*probeICMP, cfg.Probes.ICMP...)
 	}
@@ -915,6 +923,7 @@ func collectAndPushProbes(
 	diskSpool *spool.Spool,
 	baseProbeLabels []remotewrite.Label,
 	timeout time.Duration,
+	icmpCount int,
 	icmpTargets []string,
 	tcpTargets []string,
 	managedTargets []probe.Target,
@@ -924,11 +933,12 @@ func collectAndPushProbes(
 	}
 	probeReg := prometheus.NewRegistry()
 	probeReg.MustRegister(probe.NewCollector(probe.Config{
-		Logger:  logger,
-		Timeout: timeout,
-		ICMP:    icmpTargets,
-		TCP:     tcpTargets,
-		Targets: managedTargets,
+		Logger:        logger,
+		Timeout:       timeout,
+		ICMPEchoCount: icmpCount,
+		ICMP:          icmpTargets,
+		TCP:           tcpTargets,
+		Targets:       managedTargets,
 	}))
 
 	mfs, err := probeReg.Gather()

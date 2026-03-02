@@ -50,10 +50,11 @@ type Config struct {
 	} `yaml:"remote_write"`
 
 	Probes struct {
-		Job     string   `yaml:"job"`
-		Timeout Duration `yaml:"timeout"`
-		ICMP    []string `yaml:"icmp"`
-		TCP     []string `yaml:"tcp"`
+		Job       string   `yaml:"job"`
+		Timeout   Duration `yaml:"timeout"`
+		ICMPCount int      `yaml:"icmp_count"`
+		ICMP      []string `yaml:"icmp"`
+		TCP       []string `yaml:"tcp"`
 	} `yaml:"probes"`
 
 	Terminal struct {

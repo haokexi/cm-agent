@@ -33,7 +33,6 @@ remote_write:
 probes:
   job: blackbox
   timeout: 2s
-  icmp_count: 5
   icmp:
     - "10.0.0.2"
   tcp:

@@ -2,26 +2,23 @@ package probe
 
 import "testing"
 
-func TestResolveProbeIPsFromLiterals(t *testing.T) {
-	ipv4, ipv6 := resolveProbeIPs("icmp", "1.2.3.4")
-	if ipv4 != "1.2.3.4" || ipv6 != "" {
-		t.Fatalf("icmp ipv4 literal parsed wrong: ipv4=%q ipv6=%q", ipv4, ipv6)
+func TestNormalizeIPProtocol(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "ipv4", want: "ipv4"},
+		{in: "ip4", want: "ipv4"},
+		{in: "ipv6", want: "ipv6"},
+		{in: "ip6", want: "ipv6"},
+		{in: "auto", want: "auto"},
+		{in: "", want: "auto"},
+		{in: "unknown", want: "auto"},
 	}
 
-	ipv4, ipv6 = resolveProbeIPs("icmp", "2001:db8::1")
-	if ipv4 != "" || ipv6 == "" {
-		t.Fatalf("icmp ipv6 literal parsed wrong: ipv4=%q ipv6=%q", ipv4, ipv6)
-	}
-}
-
-func TestResolveProbeIPsForTCPHostPortLiterals(t *testing.T) {
-	ipv4, ipv6 := resolveProbeIPs("tcp_connect", "8.8.8.8:443")
-	if ipv4 != "8.8.8.8" || ipv6 != "" {
-		t.Fatalf("tcp ipv4 host:port parsed wrong: ipv4=%q ipv6=%q", ipv4, ipv6)
-	}
-
-	ipv4, ipv6 = resolveProbeIPs("tcp_connect", "[2001:db8::2]:8443")
-	if ipv4 != "" || ipv6 == "" {
-		t.Fatalf("tcp ipv6 host:port parsed wrong: ipv4=%q ipv6=%q", ipv4, ipv6)
+	for _, tt := range tests {
+		if got := normalizeIPProtocol(tt.in); got != tt.want {
+			t.Fatalf("normalizeIPProtocol(%q)=%q want=%q", tt.in, got, tt.want)
+		}
 	}
 }

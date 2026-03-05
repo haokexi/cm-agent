@@ -36,6 +36,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, 1, ipv4, ipv6, c.version)
 }
 
+// HostIPs returns the primary non-loopback IPv4/IPv6 of current host.
+func HostIPs() (ipv4 string, ipv6 string) {
+	return pickIPs()
+}
+
 func pickIPs() (ipv4 string, ipv6 string) {
 	ifaces, err := net.Interfaces()
 	if err != nil {

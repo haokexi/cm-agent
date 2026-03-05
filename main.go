@@ -284,6 +284,13 @@ func main() {
 			probeExtra[k] = v
 		}
 		probeExtra["probe_from"] = hostname
+		hostIPv4, hostIPv6 := agentinfo.HostIPs()
+		if hostIPv4 != "" {
+			probeExtra["ipv4"] = hostIPv4
+		}
+		if hostIPv6 != "" {
+			probeExtra["ipv6"] = hostIPv6
+		}
 		probe = convert.BaseLabels(*probeJob, "", probeExtra)
 		return base, probe
 	}

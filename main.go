@@ -277,6 +277,13 @@ func main() {
 			}
 			merged[k] = v
 		}
+		hostIPv4, hostIPv6 := agentinfo.HostIPs()
+		if hostIPv4 != "" {
+			merged["ipv4"] = hostIPv4
+		}
+		if hostIPv6 != "" {
+			merged["ipv6"] = hostIPv6
+		}
 
 		base = convert.BaseLabels(*job, *instance, merged)
 		probeExtra := make(map[string]string, len(merged)+1)
@@ -284,13 +291,6 @@ func main() {
 			probeExtra[k] = v
 		}
 		probeExtra["probe_from"] = hostname
-		hostIPv4, hostIPv6 := agentinfo.HostIPs()
-		if hostIPv4 != "" {
-			probeExtra["ipv4"] = hostIPv4
-		}
-		if hostIPv6 != "" {
-			probeExtra["ipv6"] = hostIPv6
-		}
 		probe = convert.BaseLabels(*probeJob, "", probeExtra)
 		return base, probe
 	}

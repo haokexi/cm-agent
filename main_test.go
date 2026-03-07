@@ -47,3 +47,38 @@ func TestIsManagedLabelKeyIgnored(t *testing.T) {
 		t.Fatal("tenant_id should not be ignored in managed labels")
 	}
 }
+
+func TestApplyDefaultHostIPLabelsFillsMissing(t *testing.T) {
+	labels := map[string]string{"env": "prod"}
+	applyDefaultHostIPLabels(labels, "10.0.0.2", "2001:db8::2")
+	if labels["ipv4"] != "10.0.0.2" {
+		t.Fatalf("ipv4 mismatch: %q", labels["ipv4"])
+	}
+	if labels["ipv6"] != "2001:db8::2" {
+		t.Fatalf("ipv6 mismatch: %q", labels["ipv6"])
+	}
+}
+
+func TestApplyDefaultHostIPLabelsKeepsManualOverride(t *testing.T) {
+	labels := map[string]string{
+		"ipv4": "203.0.113.10",
+		"ipv6": "2001:db8::1",
+	}
+	applyDefaultHostIPLabels(labels, "10.0.0.2", "2001:db8::2")
+	if labels["ipv4"] != "203.0.113.10" {
+		t.Fatalf("manual ipv4 should win, got %q", labels["ipv4"])
+	}
+	if labels["ipv6"] != "2001:db8::1" {
+		t.Fatalf("manual ipv6 should win, got %q", labels["ipv6"])
+	}
+}
+
+func TestApplyDefaultHostIPLabelsFillsBlankManualValue(t *testing.T) {
+	labels := map[string]string{
+		"ipv4": "  ",
+	}
+	applyDefaultHostIPLabels(labels, "10.0.0.2", "")
+	if labels["ipv4"] != "10.0.0.2" {
+		t.Fatalf("blank manual ipv4 should be replaced, got %q", labels["ipv4"])
+	}
+}

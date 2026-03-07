@@ -278,12 +278,7 @@ func main() {
 			merged[k] = v
 		}
 		hostIPv4, hostIPv6 := agentinfo.HostIPs()
-		if hostIPv4 != "" {
-			merged["ipv4"] = hostIPv4
-		}
-		if hostIPv6 != "" {
-			merged["ipv6"] = hostIPv6
-		}
+		applyDefaultHostIPLabels(merged, hostIPv4, hostIPv6)
 
 		base = convert.BaseLabels(*job, *instance, merged)
 		probeExtra := make(map[string]string, len(merged)+1)
@@ -991,6 +986,18 @@ func parseLabels(kvs []string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+func applyDefaultHostIPLabels(labels map[string]string, hostIPv4, hostIPv6 string) {
+	if labels == nil {
+		return
+	}
+	if strings.TrimSpace(labels["ipv4"]) == "" && hostIPv4 != "" {
+		labels["ipv4"] = hostIPv4
+	}
+	if strings.TrimSpace(labels["ipv6"]) == "" && hostIPv6 != "" {
+		labels["ipv6"] = hostIPv6
+	}
 }
 
 var labelKeyRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

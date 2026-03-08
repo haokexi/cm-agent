@@ -364,6 +364,11 @@ probes:
   icmp: []
   tcp: []
 
+stream_unlock:
+  enabled: true
+  interval: 1h
+  timeout: 10s
+
 terminal:
   enabled: ${ENABLE_TERMINAL}
   server: "${SERVER}"

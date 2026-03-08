@@ -29,6 +29,7 @@ import (
 	"cm-agent/internal/probe"
 	"cm-agent/internal/remotewrite"
 	"cm-agent/internal/spool"
+	"cm-agent/internal/streamunlock"
 	"cm-agent/internal/terminal"
 )
 
@@ -128,6 +129,18 @@ func main() {
 			"probe.tcp",
 			"TCP connect targets, repeatable (host:port).",
 		).Envar("CM_PROBE_TCP").Strings()
+		streamUnlockEnabled = kingpin.Flag(
+			"streamUnlock.enabled",
+			"Enable stream media/AI unlock checks and metric export.",
+		).Envar("CM_STREAM_UNLOCK_ENABLED").Default("true").Bool()
+		streamUnlockInterval = kingpin.Flag(
+			"streamUnlock.interval",
+			"Refresh interval for stream unlock checks.",
+		).Envar("CM_STREAM_UNLOCK_INTERVAL").Default("1h").Duration()
+		streamUnlockTimeout = kingpin.Flag(
+			"streamUnlock.timeout",
+			"Per-service timeout for stream unlock checks.",
+		).Envar("CM_STREAM_UNLOCK_TIMEOUT").Default("10s").Duration()
 
 		terminalEnabled = kingpin.Flag(
 			"terminal.enabled",
@@ -201,6 +214,7 @@ func main() {
 		spoolEnabled, spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
+		streamUnlockEnabled, streamUnlockInterval, streamUnlockTimeout,
 		terminalEnabled, terminalServer, terminalContextPath, terminalAgentToken,
 		terminalDialTimeout, terminalPingInterval, terminalSyncLabelsWaitTimeout, terminalTLSInsecure, terminalShell, terminalShellArgs, terminalTerm,
 		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
@@ -304,6 +318,14 @@ func main() {
 	internal := newInternalMetrics()
 	reg.MustRegister(internal)
 	reg.MustRegister(agentinfo.New(buildinfo.VersionString()))
+	if *streamUnlockEnabled {
+		reg.MustRegister(streamunlock.NewDetector(streamunlock.Config{
+			Logger:    logger.With("component", "streamunlock"),
+			Interval:  *streamUnlockInterval,
+			Timeout:   *streamUnlockTimeout,
+			UserAgent: buildinfo.UserAgent(),
+		}))
+	}
 
 	rw := remotewrite.NewClient(remotewrite.Config{
 		URL:                 *rwURL,
@@ -781,6 +803,9 @@ func applyConfigDefaults(
 	probeTimeout *time.Duration,
 	probeICMP *[]string,
 	probeTCP *[]string,
+	streamUnlockEnabled *bool,
+	streamUnlockInterval *time.Duration,
+	streamUnlockTimeout *time.Duration,
 	terminalEnabled *bool,
 	terminalServer *string,
 	terminalContextPath *string,
@@ -864,6 +889,15 @@ func applyConfigDefaults(
 	}
 	if len(*probeTCP) == 0 && len(cfg.Probes.TCP) > 0 {
 		*probeTCP = append(*probeTCP, cfg.Probes.TCP...)
+	}
+	if !*streamUnlockEnabled && cfg.StreamUnlock.Enabled {
+		*streamUnlockEnabled = true
+	}
+	if *streamUnlockInterval == time.Hour && cfg.StreamUnlock.Interval.Duration > 0 {
+		*streamUnlockInterval = cfg.StreamUnlock.Interval.Duration
+	}
+	if *streamUnlockTimeout == 10*time.Second && cfg.StreamUnlock.Timeout.Duration > 0 {
+		*streamUnlockTimeout = cfg.StreamUnlock.Timeout.Duration
 	}
 
 	if !*terminalEnabled && cfg.Terminal.Enabled {

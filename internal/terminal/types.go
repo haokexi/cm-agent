@@ -1,5 +1,7 @@
 package terminal
 
+import "cm-agent/internal/ssrust"
+
 // ControlMessage is sent from server to agent over the control WS.
 // Keep this compatible with the server's JSON schema.
 type ControlMessage struct {
@@ -40,6 +42,13 @@ type ControlMessage struct {
 	TargetVersion   string `json:"target_version,omitempty"` // empty/latest -> latest release
 	ReleaseRepo     string `json:"release_repo,omitempty"`   // owner/repo, fallback to agent default
 	GitHubProxy     string `json:"github_proxy,omitempty"`   // optional proxy prefix
+
+	// Used by ssrust_task control message.
+	SSRustRequestID    string         `json:"ssrust_request_id,omitempty"`
+	SSRustAction       string         `json:"ssrust_action,omitempty"`
+	SSRustVersion      string         `json:"ssrust_version,omitempty"`
+	SSRustOpenFirewall bool           `json:"ssrust_open_firewall,omitempty"`
+	SSRustConfig       *ssrust.Config `json:"ssrust_config,omitempty"`
 }
 
 type ProbeRule struct {
@@ -122,6 +131,29 @@ type AgentUpdateResultMessage struct {
 	ToVersion   string `json:"to_version,omitempty"`
 	AssetName   string `json:"asset_name,omitempty"`
 	AssetURL    string `json:"asset_url,omitempty"`
+
+	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type SSRustTaskResultMessage struct {
+	Type string `json:"type"` // ssrust_task_result
+
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action,omitempty"`
+
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	Installed bool           `json:"installed"`
+	Running   bool           `json:"running"`
+	Version   string         `json:"version,omitempty"`
+	Config    *ssrust.Config `json:"config,omitempty"`
+
+	ServiceName string `json:"service_name,omitempty"`
+	BinaryPath  string `json:"binary_path,omitempty"`
+	ConfigPath  string `json:"config_path,omitempty"`
 
 	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
 	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`

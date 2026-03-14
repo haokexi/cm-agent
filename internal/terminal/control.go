@@ -19,6 +19,7 @@ import (
 
 	"cm-agent/internal/netrate"
 	"cm-agent/internal/selfupdate"
+	"cm-agent/internal/ssrust"
 
 	"github.com/gorilla/websocket"
 )
@@ -141,6 +142,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 		return ws.WriteJSON(v)
 	}
 	var updating atomic.Bool
+	var ssrustUpdating atomic.Bool
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -239,6 +241,30 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				handleUpgradeAgent(ctx, cfg, m, writeJSON)
 			}(msg)
 			continue
+		case "ssrust_task":
+			action := strings.ToLower(strings.TrimSpace(msg.SSRustAction))
+			if action != "status" && !ssrustUpdating.CompareAndSwap(false, true) {
+				_ = writeJSON(SSRustTaskResultMessage{
+					Type:         "ssrust_task_result",
+					RequestID:    msg.SSRustRequestID,
+					Action:       msg.SSRustAction,
+					Success:      false,
+					Error:        "another shadowsocks-rust task is running",
+					ServiceName:  "ss-rust",
+					BinaryPath:   "/usr/local/bin/ss-rust",
+					ConfigPath:   "/etc/ss-rust/config.json",
+					StartedAtMs:  time.Now().UnixMilli(),
+					FinishedAtMs: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			go func(m ControlMessage) {
+				if action != "status" {
+					defer ssrustUpdating.Store(false)
+				}
+				handleSSRustTask(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
 		case "start_network_rate_stream":
 			rateStreamer.Start(func(snap netrate.Snapshot) {
 				wrapped := map[string]any{
@@ -296,6 +322,42 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				cfg.Logger.Info("terminal session closed", "session_id", m.SessionID)
 			}
 		}(msg)
+	}
+}
+
+func handleSSRustTask(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	manager := ssrust.NewManager(cfg.Logger.With("component", "ssrust"))
+	res := manager.Execute(ctx, ssrust.Request{
+		RequestID:    msg.SSRustRequestID,
+		Action:       msg.SSRustAction,
+		Version:      msg.SSRustVersion,
+		OpenFirewall: msg.SSRustOpenFirewall,
+		Config:       msg.SSRustConfig,
+	})
+	out := SSRustTaskResultMessage{
+		Type:         "ssrust_task_result",
+		RequestID:    res.RequestID,
+		Action:       res.Action,
+		Success:      res.Success,
+		Error:        res.Error,
+		Message:      res.Message,
+		Installed:    res.Installed,
+		Running:      res.Running,
+		Version:      res.Version,
+		Config:       res.Config,
+		ServiceName:  res.ServiceName,
+		BinaryPath:   res.BinaryPath,
+		ConfigPath:   res.ConfigPath,
+		StartedAtMs:  res.StartedAtMs,
+		FinishedAtMs: res.FinishedAtMs,
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send ssrust task result failed", "err", err, "request_id", msg.SSRustRequestID, "action", msg.SSRustAction)
 	}
 }
 

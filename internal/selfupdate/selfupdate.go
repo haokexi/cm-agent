@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,13 +26,15 @@ const defaultRepo = "haokexi/cm-agent"
 var ErrAlreadyLatest = errors.New("already on target version")
 
 type Config struct {
-	Logger         *slog.Logger
-	CurrentVersion string
-	TargetVersion  string
-	Repo           string
-	GitHubProxy    string
-	ExecPath       string
-	HTTPClient     *http.Client
+	Logger          *slog.Logger
+	CurrentVersion  string
+	TargetVersion   string
+	Repo            string
+	GitHubProxy     string
+	DownloadBaseURL string
+	DownloadToken   string
+	ExecPath        string
+	HTTPClient      *http.Client
 }
 
 type Result struct {
@@ -66,12 +69,34 @@ func Apply(ctx context.Context, cfg Config) (Result, error) {
 		exePath = p
 	}
 
-	assetName, binName, err := releaseNames(runtime.GOOS, runtime.GOARCH)
+	defaultAssetName, binName, err := releaseNames(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return Result{}, err
 	}
+	assetName := defaultAssetName
+	serviceAssetName := defaultAssetName
+	serviceChecksumName := defaultAssetName + ".sha256"
 
 	target := strings.TrimSpace(cfg.TargetVersion)
+	usedServiceSource := false
+	serviceBase := strings.TrimSpace(cfg.DownloadBaseURL)
+	if serviceBase != "" {
+		manifest, manifestErr := fetchServiceManifest(ctx, cfg.HTTPClient, serviceBase, cfg.DownloadToken, target, runtime.GOOS, runtime.GOARCH)
+		if manifestErr == nil {
+			target = manifest.Version
+			serviceAssetName = strings.TrimSpace(manifest.AssetName)
+			if serviceAssetName == "" {
+				serviceAssetName = defaultAssetName
+			}
+			serviceChecksumName = strings.TrimSpace(manifest.ChecksumName)
+			if serviceChecksumName == "" {
+				serviceChecksumName = serviceAssetName + ".sha256"
+			}
+			usedServiceSource = true
+		} else {
+			cfg.Logger.Warn("service update source unavailable, fallback to github", "err", manifestErr, "base", serviceBase)
+		}
+	}
 	if target == "" || strings.EqualFold(target, "latest") {
 		target, err = resolveLatestTag(ctx, cfg.HTTPClient, repo, cfg.GitHubProxy)
 		if err != nil {
@@ -94,14 +119,29 @@ func Apply(ctx context.Context, cfg Config) (Result, error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	assetFile := filepath.Join(tmpDir, assetName)
-	assetURL, err := downloadReleaseAsset(ctx, cfg.HTTPClient, repo, target, assetName, cfg.GitHubProxy, assetFile)
-	if err != nil {
-		return Result{}, err
+	assetFile := filepath.Join(tmpDir, defaultAssetName)
+	var assetURL string
+	checksumFile := filepath.Join(tmpDir, defaultAssetName+".sha256")
+	if usedServiceSource {
+		assetURL = serviceDownloadURL(serviceBase, target, serviceAssetName)
+		if err := downloadToFileWithAuth(ctx, cfg.HTTPClient, assetURL, cfg.DownloadToken, assetFile); err != nil {
+			cfg.Logger.Warn("service asset download failed, fallback to github", "err", err, "url", assetURL)
+			usedServiceSource = false
+		} else {
+			assetName = serviceAssetName
+			checksumURL := serviceDownloadURL(serviceBase, target, serviceChecksumName)
+			_ = downloadToFileWithAuth(ctx, cfg.HTTPClient, checksumURL, cfg.DownloadToken, checksumFile)
+		}
+	}
+	if !usedServiceSource {
+		assetName = defaultAssetName
+		assetURL, err = downloadReleaseAsset(ctx, cfg.HTTPClient, repo, target, assetName, cfg.GitHubProxy, assetFile)
+		if err != nil {
+			return Result{}, err
+		}
+		_, _ = downloadReleaseAsset(ctx, cfg.HTTPClient, repo, target, assetName+".sha256", cfg.GitHubProxy, checksumFile)
 	}
 
-	checksumFile := filepath.Join(tmpDir, assetName+".sha256")
-	_, _ = downloadReleaseAsset(ctx, cfg.HTTPClient, repo, target, assetName+".sha256", cfg.GitHubProxy, checksumFile)
 	if _, err := os.Stat(checksumFile); err == nil {
 		if err := verifySHA256(assetFile, checksumFile); err != nil {
 			return Result{}, err
@@ -127,6 +167,60 @@ func Apply(ctx context.Context, cfg Config) (Result, error) {
 		AssetName:   assetName,
 		AssetURL:    assetURL,
 	}, nil
+}
+
+type serviceManifest struct {
+	Version      string `json:"version"`
+	AssetName    string `json:"asset_name"`
+	ChecksumName string `json:"checksum_name"`
+}
+
+func fetchServiceManifest(
+	ctx context.Context,
+	client *http.Client,
+	baseURL, token, targetVersion, goos, goarch string,
+) (serviceManifest, error) {
+	u := strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/manifest"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return serviceManifest{}, fmt.Errorf("build service manifest request: %w", err)
+	}
+	req.Header.Set("User-Agent", "cm-agent-updater")
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	q := req.URL.Query()
+	if strings.TrimSpace(targetVersion) != "" {
+		q.Set("targetVersion", strings.TrimSpace(targetVersion))
+	}
+	q.Set("goos", goos)
+	q.Set("goarch", goarch)
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return serviceManifest{}, fmt.Errorf("fetch service manifest: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return serviceManifest{}, fmt.Errorf("fetch service manifest: status %d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var wrapper struct {
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data serviceManifest `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err != nil {
+		return serviceManifest{}, fmt.Errorf("decode service manifest: %w", err)
+	}
+	if wrapper.Code != 0 {
+		return serviceManifest{}, fmt.Errorf("fetch service manifest: code=%d msg=%s", wrapper.Code, wrapper.Msg)
+	}
+	if strings.TrimSpace(wrapper.Data.Version) == "" || strings.TrimSpace(wrapper.Data.AssetName) == "" {
+		return serviceManifest{}, errors.New("fetch service manifest: incomplete response")
+	}
+	return wrapper.Data, nil
 }
 
 func resolveLatestTag(ctx context.Context, client *http.Client, repo, ghProxy string) (string, error) {
@@ -169,11 +263,18 @@ func downloadReleaseAsset(
 }
 
 func downloadToFile(ctx context.Context, client *http.Client, u, outPath string) error {
+	return downloadToFileWithAuth(ctx, client, u, "", outPath)
+}
+
+func downloadToFileWithAuth(ctx context.Context, client *http.Client, u, token, outPath string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "cm-agent-updater")
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -340,6 +441,11 @@ func withProxy(proxy, rawURL string) string {
 		return rawURL
 	}
 	return strings.TrimRight(p, "/") + "/" + rawURL
+}
+
+func serviceDownloadURL(baseURL, version, asset string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	return fmt.Sprintf("%s/download/%s/%s", base, url.PathEscape(strings.TrimSpace(version)), url.PathEscape(strings.TrimSpace(asset)))
 }
 
 func tagCandidates(tag string) []string {

@@ -47,9 +47,10 @@ type AgentConfig struct {
 	MaxDuration time.Duration
 	IdleTimeout time.Duration
 
-	CurrentVersion    string
-	UpdateRepo        string
-	UpdateGitHubProxy string
+	CurrentVersion        string
+	UpdateRepo            string
+	UpdateGitHubProxy     string
+	UpdateDownloadBaseURL string
 
 	// OnSyncLabels applies dynamic labels pushed from server over control WS.
 	OnSyncLabels func(map[string]string, int64) error
@@ -477,11 +478,13 @@ func handleUpgradeAgent(
 	}
 
 	res, err := selfupdate.Apply(ctx, selfupdate.Config{
-		Logger:         cfg.Logger.With("component", "self-update"),
-		CurrentVersion: cfg.CurrentVersion,
-		TargetVersion:  targetVersion,
-		Repo:           updateRepo,
-		GitHubProxy:    ghProxy,
+		Logger:          cfg.Logger.With("component", "self-update"),
+		CurrentVersion:  cfg.CurrentVersion,
+		TargetVersion:   targetVersion,
+		Repo:            updateRepo,
+		GitHubProxy:     ghProxy,
+		DownloadBaseURL: cfg.UpdateDownloadBaseURL,
+		DownloadToken:   cfg.AgentToken,
 	})
 
 	out := AgentUpdateResultMessage{

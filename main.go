@@ -220,7 +220,7 @@ func main() {
 		terminalMaxSessions, terminalMaxDuration, terminalIdleTimeout,
 	)
 
-	var derivedTerminalControlWSURL, derivedTerminalWSURL string
+	var derivedTerminalControlWSURL, derivedTerminalWSURL, derivedTerminalDownloadBaseURL string
 	if *terminalEnabled {
 		if strings.TrimSpace(*terminalServer) == "" {
 			fmt.Fprintln(os.Stderr, "terminal enabled but missing --terminal.server (or CM_TERMINAL_SERVER / config.terminal.server)")
@@ -233,6 +233,11 @@ func main() {
 		}
 		derivedTerminalControlWSURL = c
 		derivedTerminalWSURL = t
+		derivedTerminalDownloadBaseURL, err = deriveTerminalReleaseBaseURL(*terminalServer, *terminalContextPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "derive terminal release base url: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	if strings.TrimSpace(*rwURL) == "" {
@@ -366,6 +371,7 @@ func main() {
 				IdleTimeout:           *terminalIdleTimeout,
 				CurrentVersion:        buildinfo.VersionString(),
 				UpdateRepo:            "haokexi/cm-agent",
+				UpdateDownloadBaseURL: derivedTerminalDownloadBaseURL,
 				OnSyncLabels: func(labels map[string]string, version int64) error {
 					normalized := make(map[string]string, len(labels))
 					for k, v := range labels {
@@ -1089,19 +1095,10 @@ func parseNodeIDFromInstallToken(token string) string {
 }
 
 func deriveTerminalWSURLs(serverBase, contextPath string) (control, terminal string, err error) {
-	sb := strings.TrimSpace(serverBase)
-	if sb == "" {
-		return "", "", errors.New("terminal.server is empty")
-	}
-	// Accept host[:port] by auto-prepending http://
-	if !strings.Contains(sb, "://") {
-		sb = "http://" + sb
-	}
-	u, err := url.Parse(sb)
+	u, basePath, err := parseTerminalServerBase(serverBase, contextPath)
 	if err != nil {
 		return "", "", err
 	}
-	// Normalize scheme to ws/wss
 	switch strings.ToLower(u.Scheme) {
 	case "http":
 		u.Scheme = "ws"
@@ -1111,6 +1108,46 @@ func deriveTerminalWSURLs(serverBase, contextPath string) (control, terminal str
 		// ok
 	default:
 		return "", "", fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+
+	ctl := *u
+	ctl.Path = path.Clean(basePath + "/terminal/agent/control/ws")
+	term := *u
+	term.Path = path.Clean(basePath + "/terminal/agent/terminal/ws")
+	return ctl.String(), term.String(), nil
+}
+
+func deriveTerminalReleaseBaseURL(serverBase, contextPath string) (string, error) {
+	u, basePath, err := parseTerminalServerBase(serverBase, contextPath)
+	if err != nil {
+		return "", err
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	case "http", "https":
+		// ok
+	default:
+		return "", fmt.Errorf("unsupported scheme: %s", u.Scheme)
+	}
+	u.Path = path.Clean(basePath + "/terminal/agent/release")
+	return u.String(), nil
+}
+
+func parseTerminalServerBase(serverBase, contextPath string) (*url.URL, string, error) {
+	sb := strings.TrimSpace(serverBase)
+	if sb == "" {
+		return nil, "", errors.New("terminal.server is empty")
+	}
+	// Accept host[:port] by auto-prepending http://
+	if !strings.Contains(sb, "://") {
+		sb = "http://" + sb
+	}
+	u, err := url.Parse(sb)
+	if err != nil {
+		return nil, "", err
 	}
 
 	// If serverBase has no path (or just "/"), use contextPath.
@@ -1128,12 +1165,8 @@ func deriveTerminalWSURLs(serverBase, contextPath string) (control, terminal str
 	basePath = strings.TrimRight(basePath, "/")
 	u.RawQuery = ""
 	u.Fragment = ""
-
-	ctl := *u
-	ctl.Path = path.Clean(basePath + "/terminal/agent/control/ws")
-	term := *u
-	term.Path = path.Clean(basePath + "/terminal/agent/terminal/ws")
-	return ctl.String(), term.String(), nil
+	u.Path = basePath
+	return u, basePath, nil
 }
 
 func parseLevel(s string) slog.Level {

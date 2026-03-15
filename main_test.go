@@ -82,3 +82,49 @@ func TestApplyDefaultHostIPLabelsFillsBlankManualValue(t *testing.T) {
 		t.Fatalf("blank manual ipv4 should be replaced, got %q", labels["ipv4"])
 	}
 }
+
+func TestDeriveTerminalReleaseBaseURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		serverBase  string
+		contextPath string
+		want        string
+	}{
+		{
+			name:        "derive from https server and context path",
+			serverBase:  "https://example.com:9879",
+			contextPath: "/cloudmonitor",
+			want:        "https://example.com:9879/cloudmonitor/terminal/agent/release",
+		},
+		{
+			name:        "host port without scheme defaults to http",
+			serverBase:  "example.com:9879",
+			contextPath: "cloudmonitor",
+			want:        "http://example.com:9879/cloudmonitor/terminal/agent/release",
+		},
+		{
+			name:        "existing path wins over context path",
+			serverBase:  "https://example.com/custom",
+			contextPath: "/cloudmonitor",
+			want:        "https://example.com/custom/terminal/agent/release",
+		},
+		{
+			name:        "wss converts back to https",
+			serverBase:  "wss://example.com/cloudmonitor",
+			contextPath: "",
+			want:        "https://example.com/cloudmonitor/terminal/agent/release",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := deriveTerminalReleaseBaseURL(tt.serverBase, tt.contextPath)
+			if err != nil {
+				t.Fatalf("deriveTerminalReleaseBaseURL() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("deriveTerminalReleaseBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

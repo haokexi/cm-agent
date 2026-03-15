@@ -58,6 +58,11 @@ type ControlMessage struct {
 	RealmAction    string        `json:"realm_action,omitempty"`
 	RealmVersion   string        `json:"realm_version,omitempty"`
 	RealmConfig    *realm.Config `json:"realm_config,omitempty"`
+
+	// Used by realm_rule_test control message.
+	RealmRuleTestRequestID string `json:"realm_rule_test_request_id,omitempty"`
+	RealmRuleTestListen    string `json:"realm_rule_test_listen,omitempty"`
+	RealmRuleTestRemote    string `json:"realm_rule_test_remote,omitempty"`
 }
 
 type ProbeRule struct {
@@ -186,6 +191,27 @@ type RealmTaskResultMessage struct {
 	ServiceName string `json:"service_name,omitempty"`
 	BinaryPath  string `json:"binary_path,omitempty"`
 	ConfigPath  string `json:"config_path,omitempty"`
+
+	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type RealmRuleTestResultMessage struct {
+	Type string `json:"type"` // realm_rule_test_result
+
+	RequestID string `json:"request_id,omitempty"`
+
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	ListenAddress    string `json:"listen_address,omitempty"`
+	RemoteAddress    string `json:"remote_address,omitempty"`
+	ListenReachable  bool   `json:"listen_reachable"`
+	RemoteReachable  bool   `json:"remote_reachable"`
+	ListenTestTarget string `json:"listen_test_target,omitempty"`
+	ListenError      string `json:"listen_error,omitempty"`
+	RemoteError      string `json:"remote_error,omitempty"`
 
 	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
 	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`

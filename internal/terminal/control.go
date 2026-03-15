@@ -291,6 +291,11 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				handleRealmTask(ctx, cfg, m, writeJSON)
 			}(msg)
 			continue
+		case "realm_rule_test":
+			go func(m ControlMessage) {
+				handleRealmRuleTest(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
 		case "start_network_rate_stream":
 			rateStreamer.Start(func(snap netrate.Snapshot) {
 				wrapped := map[string]any{
@@ -419,6 +424,38 @@ func handleRealmTask(
 	}
 	if err := writeJSON(out); err != nil {
 		cfg.Logger.Warn("send realm task result failed", "err", err, "request_id", msg.RealmRequestID, "action", msg.RealmAction)
+	}
+}
+
+func handleRealmRuleTest(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	res := realm.TestRule(ctx, realm.RuleTestRequest{
+		RequestID: msg.RealmRuleTestRequestID,
+		Listen:    msg.RealmRuleTestListen,
+		Remote:    msg.RealmRuleTestRemote,
+	})
+	out := RealmRuleTestResultMessage{
+		Type:             "realm_rule_test_result",
+		RequestID:        res.RequestID,
+		Success:          res.Success,
+		Error:            res.Error,
+		Message:          res.Message,
+		ListenAddress:    res.ListenAddress,
+		RemoteAddress:    res.RemoteAddress,
+		ListenReachable:  res.ListenReachable,
+		RemoteReachable:  res.RemoteReachable,
+		ListenTestTarget: res.ListenTestTarget,
+		ListenError:      res.ListenError,
+		RemoteError:      res.RemoteError,
+		StartedAtMs:      res.StartedAtMs,
+		FinishedAtMs:     res.FinishedAtMs,
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send realm rule test result failed", "err", err, "request_id", msg.RealmRuleTestRequestID)
 	}
 }
 

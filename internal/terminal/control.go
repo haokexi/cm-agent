@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"cm-agent/internal/netrate"
+	"cm-agent/internal/realm"
 	"cm-agent/internal/selfupdate"
 	"cm-agent/internal/ssrust"
 
@@ -143,6 +144,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 	}
 	var updating atomic.Bool
 	var ssrustUpdating atomic.Bool
+	var realmUpdating atomic.Bool
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -265,6 +267,30 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 				handleSSRustTask(ctx, cfg, m, writeJSON)
 			}(msg)
 			continue
+		case "realm_task":
+			action := strings.ToLower(strings.TrimSpace(msg.RealmAction))
+			if action != "status" && !realmUpdating.CompareAndSwap(false, true) {
+				_ = writeJSON(RealmTaskResultMessage{
+					Type:         "realm_task_result",
+					RequestID:    msg.RealmRequestID,
+					Action:       msg.RealmAction,
+					Success:      false,
+					Error:        "another realm task is running",
+					ServiceName:  "realm",
+					BinaryPath:   "/usr/local/bin/realm",
+					ConfigPath:   "/etc/realm/config.toml",
+					StartedAtMs:  time.Now().UnixMilli(),
+					FinishedAtMs: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			go func(m ControlMessage) {
+				if action != "status" {
+					defer realmUpdating.Store(false)
+				}
+				handleRealmTask(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
 		case "start_network_rate_stream":
 			rateStreamer.Start(func(snap netrate.Snapshot) {
 				wrapped := map[string]any{
@@ -358,6 +384,41 @@ func handleSSRustTask(
 	}
 	if err := writeJSON(out); err != nil {
 		cfg.Logger.Warn("send ssrust task result failed", "err", err, "request_id", msg.SSRustRequestID, "action", msg.SSRustAction)
+	}
+}
+
+func handleRealmTask(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	manager := realm.NewManager(cfg.Logger.With("component", "realm"))
+	res := manager.Execute(ctx, realm.Request{
+		RequestID: msg.RealmRequestID,
+		Action:    msg.RealmAction,
+		Version:   msg.RealmVersion,
+		Config:    msg.RealmConfig,
+	})
+	out := RealmTaskResultMessage{
+		Type:         "realm_task_result",
+		RequestID:    res.RequestID,
+		Action:       res.Action,
+		Success:      res.Success,
+		Error:        res.Error,
+		Message:      res.Message,
+		Installed:    res.Installed,
+		Running:      res.Running,
+		Version:      res.Version,
+		Config:       res.Config,
+		ServiceName:  res.ServiceName,
+		BinaryPath:   res.BinaryPath,
+		ConfigPath:   res.ConfigPath,
+		StartedAtMs:  res.StartedAtMs,
+		FinishedAtMs: res.FinishedAtMs,
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send realm task result failed", "err", err, "request_id", msg.RealmRequestID, "action", msg.RealmAction)
 	}
 }
 

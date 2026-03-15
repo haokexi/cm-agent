@@ -1,6 +1,9 @@
 package terminal
 
-import "cm-agent/internal/ssrust"
+import (
+	"cm-agent/internal/realm"
+	"cm-agent/internal/ssrust"
+)
 
 // ControlMessage is sent from server to agent over the control WS.
 // Keep this compatible with the server's JSON schema.
@@ -49,6 +52,12 @@ type ControlMessage struct {
 	SSRustVersion      string         `json:"ssrust_version,omitempty"`
 	SSRustOpenFirewall bool           `json:"ssrust_open_firewall,omitempty"`
 	SSRustConfig       *ssrust.Config `json:"ssrust_config,omitempty"`
+
+	// Used by realm_task control message.
+	RealmRequestID string        `json:"realm_request_id,omitempty"`
+	RealmAction    string        `json:"realm_action,omitempty"`
+	RealmVersion   string        `json:"realm_version,omitempty"`
+	RealmConfig    *realm.Config `json:"realm_config,omitempty"`
 }
 
 type ProbeRule struct {
@@ -150,6 +159,29 @@ type SSRustTaskResultMessage struct {
 	Running   bool           `json:"running"`
 	Version   string         `json:"version,omitempty"`
 	Config    *ssrust.Config `json:"config,omitempty"`
+
+	ServiceName string `json:"service_name,omitempty"`
+	BinaryPath  string `json:"binary_path,omitempty"`
+	ConfigPath  string `json:"config_path,omitempty"`
+
+	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type RealmTaskResultMessage struct {
+	Type string `json:"type"` // realm_task_result
+
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action,omitempty"`
+
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	Installed bool          `json:"installed"`
+	Running   bool          `json:"running"`
+	Version   string        `json:"version,omitempty"`
+	Config    *realm.Config `json:"config,omitempty"`
 
 	ServiceName string `json:"service_name,omitempty"`
 	BinaryPath  string `json:"binary_path,omitempty"`

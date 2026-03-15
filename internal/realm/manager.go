@@ -1,15 +1,13 @@
-package ssrust
+package realm
 
 import (
+	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,41 +15,44 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	defaultRepo = "shadowsocks/shadowsocks-rust"
+	defaultRepo = "zhboner/realm"
 
-	serviceName = "ss-rust"
-	installDir  = "/etc/ss-rust"
-	binaryPath  = "/usr/local/bin/ss-rust"
-	configPath  = "/etc/ss-rust/config.json"
-	versionFile = "/etc/ss-rust/ver.txt"
-	serviceFile = "/etc/systemd/system/ss-rust.service"
+	serviceName = "realm"
+	installDir  = "/etc/realm"
+	binaryPath  = "/usr/local/bin/realm"
+	configPath  = "/etc/realm/config.toml"
+	versionFile = "/etc/realm/ver.txt"
+	serviceFile = "/etc/systemd/system/realm.service"
 )
 
+type NetworkConfig struct {
+	NoTCP    bool `json:"no_tcp,omitempty"`
+	UseUDP   bool `json:"use_udp,omitempty"`
+	IPv6Only bool `json:"ipv6_only,omitempty"`
+}
+
+type Endpoint struct {
+	Remark string `json:"remark,omitempty"`
+	Listen string `json:"listen,omitempty"`
+	Remote string `json:"remote,omitempty"`
+}
+
 type Config struct {
-	Server     string `json:"server,omitempty"`
-	ServerPort int    `json:"server_port,omitempty"`
-	Password   string `json:"password,omitempty"`
-	Method     string `json:"method,omitempty"`
-	Mode       string `json:"mode,omitempty"`
-	FastOpen   bool   `json:"fast_open"`
-	Timeout    int    `json:"timeout,omitempty"`
-	NameServer string `json:"nameserver,omitempty"`
-	Plugin     string `json:"plugin,omitempty"`
-	PluginOpts string `json:"plugin_opts,omitempty"`
-	User       string `json:"user,omitempty"`
+	Network   NetworkConfig `json:"network,omitempty"`
+	Endpoints []Endpoint    `json:"endpoints,omitempty"`
 }
 
 type Request struct {
-	RequestID    string
-	Action       string
-	Version      string
-	OpenFirewall bool
-	Config       *Config
+	RequestID string
+	Action    string
+	Version   string
+	Config    *Config
 }
 
 type Result struct {
@@ -72,6 +73,13 @@ type Result struct {
 
 	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
 	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type statusSnapshot struct {
+	Installed bool
+	Running   bool
+	Version   string
+	Config    *Config
 }
 
 type Manager struct {
@@ -178,15 +186,8 @@ func (m *Manager) Execute(ctx context.Context, req Request) Result {
 	return res
 }
 
-type statusSnapshot struct {
-	Installed bool
-	Running   bool
-	Version   string
-	Config    *Config
-}
-
 func (m *Manager) install(ctx context.Context, req Request) (string, error) {
-	cfg, err := normalizeConfig(req.Config, true)
+	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		return "", err
 	}
@@ -211,41 +212,35 @@ func (m *Manager) install(ctx context.Context, req Request) (string, error) {
 			return "", err
 		}
 	}
-
-	message := "installed shadowsocks-rust " + version
-	if req.OpenFirewall {
-		if note, err := openFirewallPort(ctx, cfg.ServerPort); err != nil {
-			message = joinMessages(message, "firewall warning: "+err.Error())
-		} else {
-			message = joinMessages(message, note)
-		}
-	}
-	return message, nil
+	return "installed realm " + version, nil
 }
 
 func (m *Manager) configure(ctx context.Context, req Request) (string, error) {
 	if _, err := os.Stat(binaryPath); err != nil {
-		return "", errors.New("shadowsocks-rust is not installed")
+		return "", errors.New("realm is not installed")
 	}
-	cfg, err := normalizeConfig(req.Config, false)
+	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		return "", err
 	}
 	if err := writeConfig(cfg); err != nil {
 		return "", err
 	}
-	if err := restartService(ctx); err != nil {
+	if err := installServiceFile(); err != nil {
 		return "", err
 	}
-	message := "configuration applied"
-	if req.OpenFirewall {
-		if note, err := openFirewallPort(ctx, cfg.ServerPort); err != nil {
-			message = joinMessages(message, "firewall warning: "+err.Error())
-		} else {
-			message = joinMessages(message, note)
+	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
+		return "", err
+	}
+	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
+		return "", err
+	}
+	if err := runSystemctl(ctx, "restart", serviceName); err != nil {
+		if err := runSystemctl(ctx, "start", serviceName); err != nil {
+			return "", err
 		}
 	}
-	return message, nil
+	return "configuration applied", nil
 }
 
 func (m *Manager) installBinary(ctx context.Context, version string) (string, error) {
@@ -270,7 +265,7 @@ func (m *Manager) installBinary(ctx context.Context, version string) (string, er
 		return "", err
 	}
 
-	tmpDir, err := os.MkdirTemp("", "ssrust-install-*")
+	tmpDir, err := os.MkdirTemp("", "realm-install-*")
 	if err != nil {
 		return "", fmt.Errorf("create temp dir: %w", err)
 	}
@@ -307,7 +302,7 @@ func (m *Manager) resolveLatestVersion(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("build latest request: %w", err)
 	}
-	req.Header.Set("User-Agent", "cm-agent-ssrust")
+	req.Header.Set("User-Agent", "cm-agent-realm")
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("resolve latest version: %w", err)
@@ -326,32 +321,29 @@ func (m *Manager) resolveLatestVersion(ctx context.Context) (string, error) {
 func releaseAssetName() (string, error) {
 	switch runtime.GOARCH {
 	case "amd64":
-		return "shadowsocks-vVERSION.x86_64-unknown-linux-gnu.tar.xz", nil
+		return "realm-x86_64-unknown-linux-gnu.tar.gz", nil
 	case "arm64":
-		return "shadowsocks-vVERSION.aarch64-unknown-linux-gnu.tar.xz", nil
-	case "386":
-		return "shadowsocks-vVERSION.i686-unknown-linux-musl.tar.xz", nil
+		return "realm-aarch64-unknown-linux-gnu.tar.gz", nil
 	default:
 		return "", fmt.Errorf("unsupported arch: %s", runtime.GOARCH)
 	}
 }
 
 func (m *Manager) downloadAsset(ctx context.Context, version, assetName, outPath string) error {
-	assetName = strings.ReplaceAll(assetName, "VERSION", version)
 	rawURL := fmt.Sprintf("https://github.com/%s/releases/download/v%s/%s", defaultRepo, url.PathEscape(version), url.PathEscape(assetName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return fmt.Errorf("build download request: %w", err)
 	}
-	req.Header.Set("User-Agent", "cm-agent-ssrust")
+	req.Header.Set("User-Agent", "cm-agent-realm")
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download ss-rust asset: %w", err)
+		return fmt.Errorf("download realm asset: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("download ss-rust asset: status %d", resp.StatusCode)
+		return fmt.Errorf("download realm asset: status %d", resp.StatusCode)
 	}
 
 	f, err := os.Create(outPath)
@@ -369,14 +361,14 @@ func (m *Manager) downloadAsset(ctx context.Context, version, assetName, outPath
 }
 
 func extractArchive(ctx context.Context, archivePath, outDir string) error {
-	cmd := exec.CommandContext(ctx, "tar", "-xJf", archivePath, "-C", outDir)
+	cmd := exec.CommandContext(ctx, "tar", "-xzf", archivePath, "-C", outDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(output))
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("extract ss-rust archive: %s", msg)
+		return fmt.Errorf("extract realm archive: %s", msg)
 	}
 	return nil
 }
@@ -390,7 +382,7 @@ func findExtractedBinary(root string) (string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if path.Base(p) == "ssserver" {
+		if path.Base(p) == "realm" {
 			found = p
 			return filepath.SkipAll
 		}
@@ -400,30 +392,51 @@ func findExtractedBinary(root string) (string, error) {
 		return "", fmt.Errorf("scan extracted archive: %w", err)
 	}
 	if strings.TrimSpace(found) == "" {
-		return "", errors.New("ssserver binary not found in release archive")
+		return "", errors.New("realm binary not found in release archive")
 	}
 	return found, nil
 }
 
 func writeConfig(cfg Config) error {
+	payload, err := renderConfig(cfg)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	payload, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	payload = append(payload, '\n')
 	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}
 	return nil
 }
 
+func renderConfig(cfg Config) ([]byte, error) {
+	cfg, err := normalizeConfig(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	var b strings.Builder
+	b.WriteString("[network]\n")
+	fmt.Fprintf(&b, "no_tcp = %t\n", cfg.Network.NoTCP)
+	fmt.Fprintf(&b, "use_udp = %t\n", cfg.Network.UseUDP)
+	fmt.Fprintf(&b, "ipv6_only = %t\n", cfg.Network.IPv6Only)
+	for _, ep := range cfg.Endpoints {
+		b.WriteString("\n")
+		if strings.TrimSpace(ep.Remark) != "" {
+			fmt.Fprintf(&b, "# 备注: %s\n", sanitizeComment(ep.Remark))
+		}
+		b.WriteString("[[endpoints]]\n")
+		fmt.Fprintf(&b, "listen = %q\n", ep.Listen)
+		fmt.Fprintf(&b, "remote = %q\n", ep.Remote)
+	}
+	return []byte(b.String()), nil
+}
+
 func installServiceFile() error {
 	content := strings.Join([]string{
 		"[Unit]",
-		"Description=Shadowsocks Rust Service",
+		"Description=Realm Proxy Service",
 		"After=network-online.target",
 		"Wants=network-online.target",
 		"",
@@ -446,24 +459,39 @@ func installServiceFile() error {
 }
 
 func startService(ctx context.Context) error {
-	if err := runSystemctl(ctx, "start", serviceName); err != nil {
+	if _, err := os.Stat(binaryPath); err != nil {
+		return errors.New("realm is not installed")
+	}
+	if err := installServiceFile(); err != nil {
 		return err
 	}
-	return nil
+	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
+		return err
+	}
+	return runSystemctl(ctx, "start", serviceName)
 }
 
 func stopService(ctx context.Context) error {
-	if err := runSystemctl(ctx, "stop", serviceName); err != nil {
-		return err
-	}
-	return nil
+	return runSystemctl(ctx, "stop", serviceName)
 }
 
 func restartService(ctx context.Context) error {
-	if err := runSystemctl(ctx, "restart", serviceName); err != nil {
+	if _, err := os.Stat(binaryPath); err != nil {
+		return errors.New("realm is not installed")
+	}
+	if err := installServiceFile(); err != nil {
 		return err
 	}
-	return nil
+	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
+		return err
+	}
+	return runSystemctl(ctx, "restart", serviceName)
 }
 
 func uninstall(ctx context.Context) (string, error) {
@@ -479,7 +507,7 @@ func uninstall(ctx context.Context) (string, error) {
 	if err := os.RemoveAll(installDir); err != nil {
 		return "", fmt.Errorf("remove install dir: %w", err)
 	}
-	return "shadowsocks-rust uninstalled", nil
+	return "realm uninstalled", nil
 }
 
 func collectStatus(ctx context.Context) (statusSnapshot, error) {
@@ -508,12 +536,137 @@ func readConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	var cfg Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config file: %w", err)
+	cfg, err := parseConfigBytes(b)
+	if err != nil {
+		return nil, err
 	}
-	cfg = applyConfigDefaults(cfg, false)
 	return &cfg, nil
+}
+
+func parseConfigBytes(b []byte) (Config, error) {
+	cfg := defaultConfig()
+	var currentEndpoint *Endpoint
+	var pendingRemark string
+
+	scanner := bufio.NewScanner(strings.NewReader(string(b)))
+	section := ""
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		rawLine := scanner.Text()
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			remark := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			if strings.HasPrefix(remark, "备注:") {
+				pendingRemark = strings.TrimSpace(strings.TrimPrefix(remark, "备注:"))
+			} else if strings.HasPrefix(strings.ToLower(remark), "remark:") {
+				pendingRemark = strings.TrimSpace(remark[7:])
+			}
+			continue
+		}
+		switch line {
+		case "[network]":
+			if currentEndpoint != nil {
+				cfg.Endpoints = appendEndpoint(cfg.Endpoints, *currentEndpoint)
+				currentEndpoint = nil
+			}
+			section = "network"
+			continue
+		case "[[endpoints]]":
+			if currentEndpoint != nil {
+				cfg.Endpoints = appendEndpoint(cfg.Endpoints, *currentEndpoint)
+			}
+			currentEndpoint = &Endpoint{Remark: pendingRemark}
+			pendingRemark = ""
+			section = "endpoint"
+			continue
+		}
+
+		key, value, ok := splitKV(line)
+		if !ok {
+			continue
+		}
+		switch section {
+		case "network":
+			bv, err := parseBoolValue(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("parse network config line %d: %w", lineNo, err)
+			}
+			switch key {
+			case "no_tcp":
+				cfg.Network.NoTCP = bv
+			case "use_udp":
+				cfg.Network.UseUDP = bv
+			case "ipv6_only":
+				cfg.Network.IPv6Only = bv
+			}
+		case "endpoint":
+			if currentEndpoint == nil {
+				currentEndpoint = &Endpoint{Remark: pendingRemark}
+				pendingRemark = ""
+			}
+			sv, err := parseStringValue(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("parse endpoint line %d: %w", lineNo, err)
+			}
+			switch key {
+			case "listen":
+				currentEndpoint.Listen = sv
+			case "remote":
+				currentEndpoint.Remote = sv
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return Config{}, fmt.Errorf("scan config file: %w", err)
+	}
+	if currentEndpoint != nil {
+		cfg.Endpoints = appendEndpoint(cfg.Endpoints, *currentEndpoint)
+	}
+	return normalizeConfig(&cfg)
+}
+
+func splitKV(line string) (string, string, bool) {
+	idx := strings.Index(line, "=")
+	if idx <= 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(line[:idx])
+	value := strings.TrimSpace(line[idx+1:])
+	if key == "" || value == "" {
+		return "", "", false
+	}
+	return key, value, true
+}
+
+func parseBoolValue(v string) (bool, error) {
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return false, fmt.Errorf("invalid bool %q", v)
+	}
+	return b, nil
+}
+
+func parseStringValue(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+		return "", fmt.Errorf("invalid string %q", v)
+	}
+	out, err := strconv.Unquote(v)
+	if err != nil {
+		return "", fmt.Errorf("unquote string %q: %w", v, err)
+	}
+	return out, nil
+}
+
+func appendEndpoint(list []Endpoint, ep Endpoint) []Endpoint {
+	if strings.TrimSpace(ep.Listen) == "" && strings.TrimSpace(ep.Remote) == "" {
+		return list
+	}
+	return append(list, ep)
 }
 
 func readVersion() string {
@@ -540,228 +693,56 @@ func runSystemctl(ctx context.Context, args ...string) error {
 	return nil
 }
 
-func openFirewallPort(ctx context.Context, port int) (string, error) {
-	var notes []string
-	if _, err := exec.LookPath("ufw"); err == nil {
-		cmd := exec.CommandContext(ctx, "ufw", "status")
-		if out, statusErr := cmd.CombinedOutput(); statusErr == nil && strings.Contains(string(out), "Status: active") {
-			if err := runCmd(ctx, "ufw", "allow", fmt.Sprintf("%d/tcp", port)); err != nil {
-				return "", err
-			}
-			if err := runCmd(ctx, "ufw", "allow", fmt.Sprintf("%d/udp", port)); err != nil {
-				return "", err
-			}
-			notes = append(notes, "ufw updated")
-		}
-	}
-	if _, err := exec.LookPath("firewall-cmd"); err == nil {
-		if err := runCmd(ctx, "firewall-cmd", "--permanent", "--add-port", fmt.Sprintf("%d/tcp", port)); err == nil {
-			if err := runCmd(ctx, "firewall-cmd", "--permanent", "--add-port", fmt.Sprintf("%d/udp", port)); err == nil {
-				if reloadErr := runCmd(ctx, "firewall-cmd", "--reload"); reloadErr == nil {
-					notes = append(notes, "firewalld updated")
-				}
-			}
-		}
-	}
-	if len(notes) == 0 {
-		return "no managed firewall detected", nil
-	}
-	return strings.Join(notes, ", "), nil
-}
-
-func runCmd(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(output))
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
-	}
-	return nil
-}
-
-func normalizeConfig(input *Config, allowGenerated bool) (Config, error) {
-	cfg := defaultConfig()
-	if input != nil {
-		if strings.TrimSpace(input.Server) != "" {
-			cfg.Server = strings.TrimSpace(input.Server)
-		}
-		if input.ServerPort > 0 {
-			cfg.ServerPort = input.ServerPort
-		}
-		if strings.TrimSpace(input.Password) != "" {
-			cfg.Password = strings.TrimSpace(input.Password)
-		}
-		if strings.TrimSpace(input.Method) != "" {
-			cfg.Method = strings.TrimSpace(input.Method)
-		}
-		if strings.TrimSpace(input.Mode) != "" {
-			cfg.Mode = strings.TrimSpace(input.Mode)
-		}
-		cfg.FastOpen = input.FastOpen
-		if input.Timeout > 0 {
-			cfg.Timeout = input.Timeout
-		}
-		cfg.NameServer = strings.TrimSpace(input.NameServer)
-		cfg.Plugin = strings.TrimSpace(input.Plugin)
-		cfg.PluginOpts = strings.TrimSpace(input.PluginOpts)
-		if strings.TrimSpace(input.User) != "" {
-			cfg.User = strings.TrimSpace(input.User)
-		}
-	}
-	if cfg.ServerPort <= 0 {
-		if !allowGenerated {
-			return Config{}, errors.New("server_port is required")
-		}
-		port, err := randomPort()
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.ServerPort = port
-	}
-	if cfg.ServerPort < 1 || cfg.ServerPort > 65535 {
-		return Config{}, errors.New("server_port must be in range 1-65535")
-	}
-	if cfg.Password == "" {
-		if !allowGenerated {
-			return Config{}, errors.New("password is required")
-		}
-		password, err := randomPasswordForMethod(cfg.Method)
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.Password = password
-	}
-	if cfg.Method == "" {
-		return Config{}, errors.New("method is required")
-	}
-	if cfg.Mode == "" {
-		cfg.Mode = "tcp_and_udp"
-	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 300
-	}
-	if cfg.Server == "" {
-		cfg.Server = "::"
-	}
-	if cfg.User == "" {
-		cfg.User = "nobody"
-	}
-	return cfg, nil
-}
-
-func applyConfigDefaults(cfg Config, preserveSecrets bool) Config {
-	def := defaultConfig()
-	if strings.TrimSpace(cfg.Server) == "" {
-		cfg.Server = def.Server
-	}
-	if cfg.ServerPort <= 0 {
-		cfg.ServerPort = def.ServerPort
-	}
-	if !preserveSecrets && strings.TrimSpace(cfg.Password) == "" {
-		cfg.Password = def.Password
-	}
-	if strings.TrimSpace(cfg.Method) == "" {
-		cfg.Method = def.Method
-	}
-	if strings.TrimSpace(cfg.Mode) == "" {
-		cfg.Mode = def.Mode
-	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = def.Timeout
-	}
-	if strings.TrimSpace(cfg.User) == "" {
-		cfg.User = def.User
-	}
-	return cfg
-}
-
-func defaultConfig() Config {
-	return Config{
-		Server:     "::",
-		ServerPort: 8388,
-		Method:     "2022-blake3-aes-128-gcm",
-		Mode:       "tcp_and_udp",
-		FastOpen:   false,
-		Timeout:    300,
-		User:       "nobody",
-	}
-}
-
-func randomPasswordForMethod(method string) (string, error) {
-	buf := make([]byte, passwordBytesForMethod(method))
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate password: %w", err)
-	}
-	return base64.StdEncoding.EncodeToString(buf), nil
-}
-
-func passwordBytesForMethod(method string) int {
-	switch strings.TrimSpace(method) {
-	case "2022-blake3-aes-128-gcm":
-		return 16
-	case "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305", "2022-blake3-chacha8-poly1305":
-		return 32
-	default:
-		return 24
-	}
-}
-
-func randomPort() (int, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(50000))
-	if err != nil {
-		return 0, fmt.Errorf("generate random port: %w", err)
-	}
-	return 10000 + int(n.Int64()), nil
-}
-
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return fmt.Errorf("open source binary: %w", err)
+		return fmt.Errorf("open source file: %w", err)
 	}
 	defer in.Close()
 
 	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
-		return fmt.Errorf("create target binary: %w", err)
+		return fmt.Errorf("open target file: %w", err)
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
-		return fmt.Errorf("copy binary: %w", err)
+		_ = os.Remove(tmp)
+		return fmt.Errorf("copy file contents: %w", err)
 	}
 	if err := out.Sync(); err != nil {
 		out.Close()
-		return fmt.Errorf("flush binary: %w", err)
+		_ = os.Remove(tmp)
+		return fmt.Errorf("flush target file: %w", err)
 	}
 	if err := out.Close(); err != nil {
-		return fmt.Errorf("close binary: %w", err)
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close target file: %w", err)
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chmod target file: %w", err)
 	}
 	if err := os.Rename(tmp, dst); err != nil {
-		return fmt.Errorf("replace binary: %w", err)
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace target file: %w", err)
 	}
 	return nil
 }
 
 func ensureSupportedHost() error {
 	if runtime.GOOS != "linux" {
-		return errors.New("shadowsocks-rust management is only supported on linux")
-	}
-	if os.Geteuid() != 0 {
-		return errors.New("shadowsocks-rust management requires root privileges")
+		return fmt.Errorf("unsupported os: %s", runtime.GOOS)
 	}
 	return nil
 }
 
 func sameVersion(a, b string) bool {
-	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
+	return strings.TrimSpace(strings.TrimPrefix(a, "v")) == strings.TrimSpace(strings.TrimPrefix(b, "v"))
 }
 
 func joinMessages(parts ...string) string {
-	out := make([]string, 0, len(parts))
+	var out []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part != "" {
@@ -769,4 +750,70 @@ func joinMessages(parts ...string) string {
 		}
 	}
 	return strings.Join(out, "; ")
+}
+
+func sanitizeComment(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.TrimSpace(s)
+}
+
+func defaultConfig() Config {
+	return Config{
+		Network: NetworkConfig{
+			NoTCP:    false,
+			UseUDP:   true,
+			IPv6Only: false,
+		},
+		Endpoints: []Endpoint{},
+	}
+}
+
+func normalizeConfig(input *Config) (Config, error) {
+	cfg := defaultConfig()
+	if input != nil {
+		cfg.Network.NoTCP = input.Network.NoTCP
+		cfg.Network.UseUDP = input.Network.UseUDP
+		cfg.Network.IPv6Only = input.Network.IPv6Only
+		cfg.Endpoints = cfg.Endpoints[:0]
+		for _, raw := range input.Endpoints {
+			ep := Endpoint{
+				Remark: sanitizeComment(raw.Remark),
+				Listen: strings.TrimSpace(raw.Listen),
+				Remote: strings.TrimSpace(raw.Remote),
+			}
+			if ep.Listen == "" && ep.Remote == "" {
+				continue
+			}
+			if ep.Listen == "" || ep.Remote == "" {
+				return Config{}, errors.New("endpoint listen/remote are required")
+			}
+			if err := validateAddress(ep.Listen); err != nil {
+				return Config{}, fmt.Errorf("invalid listen address %q: %w", ep.Listen, err)
+			}
+			if err := validateAddress(ep.Remote); err != nil {
+				return Config{}, fmt.Errorf("invalid remote address %q: %w", ep.Remote, err)
+			}
+			cfg.Endpoints = append(cfg.Endpoints, ep)
+		}
+	}
+	return cfg, nil
+}
+
+func validateAddress(addr string) error {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(host) == "" {
+		return errors.New("host is required")
+	}
+	p, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return err
+	}
+	if p < 1 || p > 65535 {
+		return fmt.Errorf("port out of range: %d", p)
+	}
+	return nil
 }

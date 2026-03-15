@@ -1,6 +1,9 @@
 package realm
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -94,5 +97,50 @@ func TestNormalizeConfigRejectsInvalidEndpoint(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid listen address error")
+	}
+}
+
+func TestExtractPathsFromArgs(t *testing.T) {
+	binPath, configFile := extractPathsFromArgs([]string{"/root/realm/realm", "-c", "/root/realm/config.toml"})
+	if binPath != "/root/realm/realm" {
+		t.Fatalf("unexpected binPath: %q", binPath)
+	}
+	if configFile != "/root/realm/config.toml" {
+		t.Fatalf("unexpected configFile: %q", configFile)
+	}
+}
+
+func TestSplitCommandLine(t *testing.T) {
+	args, err := splitCommandLine(`/usr/local/bin/realm -c "/etc/realm/config.toml"`)
+	if err != nil {
+		t.Fatalf("splitCommandLine() error = %v", err)
+	}
+	want := []string{"/usr/local/bin/realm", "-c", "/etc/realm/config.toml"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected args: got=%v want=%v", args, want)
+	}
+}
+
+func TestParseExecStartFromUnitFile(t *testing.T) {
+	dir := t.TempDir()
+	unitPath := filepath.Join(dir, "realm.service")
+	content := strings.Join([]string{
+		"[Unit]",
+		"Description=Realm Proxy Service",
+		"[Service]",
+		`ExecStart=/root/realm/realm -c /root/realm/config.toml`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(unitPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write unit file: %v", err)
+	}
+
+	args, err := parseExecStartFromUnitFile(unitPath)
+	if err != nil {
+		t.Fatalf("parseExecStartFromUnitFile() error = %v", err)
+	}
+	want := []string{"/root/realm/realm", "-c", "/root/realm/config.toml"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected args: got=%v want=%v", args, want)
 	}
 }

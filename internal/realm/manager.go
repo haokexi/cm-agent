@@ -76,10 +76,19 @@ type Result struct {
 }
 
 type statusSnapshot struct {
-	Installed bool
-	Running   bool
-	Version   string
-	Config    *Config
+	Installed  bool
+	Running    bool
+	Version    string
+	Config     *Config
+	BinaryPath string
+	ConfigPath string
+	UnitPath   string
+}
+
+type runtimePaths struct {
+	BinaryPath string
+	ConfigPath string
+	UnitPath   string
 }
 
 type Manager struct {
@@ -183,6 +192,12 @@ func (m *Manager) Execute(ctx context.Context, req Request) Result {
 	res.Running = status.Running
 	res.Version = status.Version
 	res.Config = status.Config
+	if strings.TrimSpace(status.BinaryPath) != "" {
+		res.BinaryPath = status.BinaryPath
+	}
+	if strings.TrimSpace(status.ConfigPath) != "" {
+		res.ConfigPath = status.ConfigPath
+	}
 	return res
 }
 
@@ -195,7 +210,7 @@ func (m *Manager) install(ctx context.Context, req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := writeConfig(cfg); err != nil {
+	if err := writeConfig(configPath, cfg); err != nil {
 		return "", err
 	}
 	if err := installServiceFile(); err != nil {
@@ -216,23 +231,17 @@ func (m *Manager) install(ctx context.Context, req Request) (string, error) {
 }
 
 func (m *Manager) configure(ctx context.Context, req Request) (string, error) {
-	if _, err := os.Stat(binaryPath); err != nil {
+	paths, _ := discoverRuntimePaths(ctx)
+	targetBinaryPath := firstExistingOrDefault([]string{paths.BinaryPath, binaryPath, legacyBinaryPath()})
+	if targetBinaryPath == "" {
 		return "", errors.New("realm is not installed")
 	}
 	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		return "", err
 	}
-	if err := writeConfig(cfg); err != nil {
-		return "", err
-	}
-	if err := installServiceFile(); err != nil {
-		return "", err
-	}
-	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
-		return "", err
-	}
-	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
+	targetConfigPath := firstNonEmpty(paths.ConfigPath, configPath)
+	if err := writeConfig(targetConfigPath, cfg); err != nil {
 		return "", err
 	}
 	if err := runSystemctl(ctx, "restart", serviceName); err != nil {
@@ -397,20 +406,6 @@ func findExtractedBinary(root string) (string, error) {
 	return found, nil
 }
 
-func writeConfig(cfg Config) error {
-	payload, err := renderConfig(cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
-		return fmt.Errorf("write config file: %w", err)
-	}
-	return nil
-}
-
 func renderConfig(cfg Config) ([]byte, error) {
 	cfg, err := normalizeConfig(&cfg)
 	if err != nil {
@@ -459,17 +454,10 @@ func installServiceFile() error {
 }
 
 func startService(ctx context.Context) error {
-	if _, err := os.Stat(binaryPath); err != nil {
+	paths, _ := discoverRuntimePaths(ctx)
+	targetBinaryPath := firstExistingOrDefault([]string{paths.BinaryPath, binaryPath, legacyBinaryPath()})
+	if targetBinaryPath == "" {
 		return errors.New("realm is not installed")
-	}
-	if err := installServiceFile(); err != nil {
-		return err
-	}
-	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
-		return err
-	}
-	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
-		return err
 	}
 	return runSystemctl(ctx, "start", serviceName)
 }
@@ -479,17 +467,10 @@ func stopService(ctx context.Context) error {
 }
 
 func restartService(ctx context.Context) error {
-	if _, err := os.Stat(binaryPath); err != nil {
+	paths, _ := discoverRuntimePaths(ctx)
+	targetBinaryPath := firstExistingOrDefault([]string{paths.BinaryPath, binaryPath, legacyBinaryPath()})
+	if targetBinaryPath == "" {
 		return errors.New("realm is not installed")
-	}
-	if err := installServiceFile(); err != nil {
-		return err
-	}
-	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
-		return err
-	}
-	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
-		return err
 	}
 	return runSystemctl(ctx, "restart", serviceName)
 }
@@ -512,11 +493,13 @@ func uninstall(ctx context.Context) (string, error) {
 
 func collectStatus(ctx context.Context) (statusSnapshot, error) {
 	out := statusSnapshot{}
-	if _, err := os.Stat(binaryPath); err == nil {
-		out.Installed = true
-	}
+	paths, _ := discoverRuntimePaths(ctx)
+	out.BinaryPath = firstExistingOrDefault([]string{paths.BinaryPath, binaryPath, legacyBinaryPath()})
+	out.ConfigPath = firstReadableOrDefault([]string{paths.ConfigPath, configPath, legacyConfigPath()})
+	out.UnitPath = firstExistingOrDefault([]string{paths.UnitPath, serviceFile})
+	out.Installed = out.BinaryPath != "" || out.ConfigPath != "" || out.UnitPath != ""
 	out.Version = readVersion()
-	cfg, err := readConfig()
+	cfg, err := readConfig(out.ConfigPath)
 	if err == nil {
 		out.Config = cfg
 	} else if out.Installed && !errors.Is(err, os.ErrNotExist) {
@@ -531,8 +514,11 @@ func collectStatus(ctx context.Context) (statusSnapshot, error) {
 	return out, nil
 }
 
-func readConfig() (*Config, error) {
-	b, err := os.ReadFile(configPath)
+func readConfig(targetPath string) (*Config, error) {
+	if strings.TrimSpace(targetPath) == "" {
+		return nil, os.ErrNotExist
+	}
+	b, err := os.ReadFile(targetPath)
 	if err != nil {
 		return nil, err
 	}
@@ -756,6 +742,267 @@ func sanitizeComment(s string) string {
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.TrimSpace(s)
+}
+
+func legacyBinaryPath() string {
+	return "/root/realm/realm"
+}
+
+func legacyConfigPath() string {
+	return "/root/realm/config.toml"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func firstExistingOrDefault(values []string) string {
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, err := os.Stat(v); err == nil {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstReadableOrDefault(values []string) string {
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, err := os.Stat(v); err == nil {
+			return v
+		}
+	}
+	return ""
+}
+
+func writeConfig(targetPath string, cfg Config) error {
+	payload, err := renderConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(targetPath) == "" {
+		return errors.New("config path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	if err := os.WriteFile(targetPath, payload, 0o600); err != nil {
+		return fmt.Errorf("write config file: %w", err)
+	}
+	return nil
+}
+
+func discoverRuntimePaths(ctx context.Context) (runtimePaths, error) {
+	var out runtimePaths
+
+	if pid, err := readMainPID(ctx); err == nil && pid > 1 {
+		if args, err := readProcArgs(pid); err == nil {
+			bin, cfg := extractPathsFromArgs(args)
+			out.BinaryPath = firstNonEmpty(out.BinaryPath, bin)
+			out.ConfigPath = firstNonEmpty(out.ConfigPath, cfg)
+		}
+	}
+
+	unitPath, err := readUnitPath(ctx)
+	if err == nil {
+		out.UnitPath = unitPath
+	}
+	if strings.TrimSpace(out.UnitPath) != "" {
+		if args, err := parseExecStartFromUnitFile(out.UnitPath); err == nil {
+			bin, cfg := extractPathsFromArgs(args)
+			out.BinaryPath = firstNonEmpty(out.BinaryPath, bin)
+			out.ConfigPath = firstNonEmpty(out.ConfigPath, cfg)
+		}
+	}
+
+	return out, nil
+}
+
+func readMainPID(ctx context.Context) (int, error) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return 0, err
+	}
+	cmd := exec.CommandContext(ctx, "systemctl", "show", serviceName, "--property", "MainPID", "--value")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return 0, fmt.Errorf("read main pid: %s", msg)
+	}
+	pidText := strings.TrimSpace(string(output))
+	if pidText == "" {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil {
+		return 0, fmt.Errorf("parse main pid %q: %w", pidText, err)
+	}
+	return pid, nil
+}
+
+func readUnitPath(ctx context.Context) (string, error) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		if _, statErr := os.Stat(serviceFile); statErr == nil {
+			return serviceFile, nil
+		}
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, "systemctl", "show", serviceName, "--property", "FragmentPath", "--value")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if _, statErr := os.Stat(serviceFile); statErr == nil {
+			return serviceFile, nil
+		}
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("read unit path: %s", msg)
+	}
+	pathText := strings.TrimSpace(string(output))
+	if pathText == "" || pathText == "[not set]" {
+		if _, statErr := os.Stat(serviceFile); statErr == nil {
+			return serviceFile, nil
+		}
+		return "", os.ErrNotExist
+	}
+	return pathText, nil
+}
+
+func readProcArgs(pid int) ([]string, error) {
+	if pid <= 1 {
+		return nil, errors.New("invalid pid")
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for _, part := range strings.Split(string(data), "\x00") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			args = append(args, part)
+		}
+	}
+	if len(args) == 0 {
+		return nil, errors.New("empty cmdline")
+	}
+	return args, nil
+}
+
+func parseExecStartFromUnitFile(unitPath string) ([]string, error) {
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		return nil, err
+	}
+	var logicalLines []string
+	var current strings.Builder
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.HasSuffix(line, "\\") {
+			current.WriteString(strings.TrimSuffix(line, "\\"))
+			continue
+		}
+		current.WriteString(line)
+		logicalLines = append(logicalLines, current.String())
+		current.Reset()
+	}
+	if current.Len() > 0 {
+		logicalLines = append(logicalLines, current.String())
+	}
+
+	for _, line := range logicalLines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "ExecStart="))
+		value = strings.TrimLeft(value, "-+!:@")
+		return splitCommandLine(value)
+	}
+	return nil, os.ErrNotExist
+}
+
+func splitCommandLine(command string) ([]string, error) {
+	var (
+		args     []string
+		current  strings.Builder
+		inSingle bool
+		inDouble bool
+		escaped  bool
+	)
+
+	flush := func() {
+		if current.Len() > 0 {
+			args = append(args, current.String())
+			current.Reset()
+		}
+	}
+
+	for _, r := range command {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if escaped || inSingle || inDouble {
+		return nil, fmt.Errorf("invalid command line %q", command)
+	}
+	flush()
+	if len(args) == 0 {
+		return nil, os.ErrNotExist
+	}
+	return args, nil
+}
+
+func extractPathsFromArgs(args []string) (string, string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	binPath := strings.TrimSpace(args[0])
+	var configFile string
+	for i := 1; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case arg == "-c" || arg == "--config":
+			if i+1 < len(args) {
+				configFile = strings.TrimSpace(args[i+1])
+			}
+		case strings.HasPrefix(arg, "-c="):
+			configFile = strings.TrimSpace(strings.TrimPrefix(arg, "-c="))
+		case strings.HasPrefix(arg, "--config="):
+			configFile = strings.TrimSpace(strings.TrimPrefix(arg, "--config="))
+		}
+		if configFile != "" {
+			break
+		}
+	}
+	return binPath, configFile
 }
 
 func defaultConfig() Config {

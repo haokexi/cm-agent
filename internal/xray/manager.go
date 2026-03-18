@@ -832,7 +832,9 @@ func (m *Manager) validate(ctx context.Context, req Request) (checkOutcome, erro
 	if req.Config == nil {
 		return checkOutcome{}, errors.New("xray config is required")
 	}
-	cfg, err := normalizeConfig(req.Config, false)
+	// Validation accepts an omitted port and fills a random high port so REALITY preflight
+	// checks do not silently fall back to 443 before the actual install step.
+	cfg, err := normalizeConfig(req.Config, true)
 	if err != nil {
 		return checkOutcome{}, err
 	}
@@ -1027,6 +1029,7 @@ func firstNonEmpty(values ...string) string {
 
 func normalizeConfig(input *Config, allowGenerated bool) (Config, error) {
 	cfg := defaultConfig()
+	portProvided := input != nil && input.Port > 0
 	if input != nil {
 		if strings.TrimSpace(input.Listen) != "" {
 			cfg.Listen = strings.TrimSpace(input.Listen)
@@ -1060,15 +1063,16 @@ func normalizeConfig(input *Config, allowGenerated bool) (Config, error) {
 		}
 	}
 
-	if cfg.Port <= 0 {
-		if !allowGenerated {
+	if !portProvided {
+		if allowGenerated {
+			port, err := randomPort()
+			if err != nil {
+				return Config{}, err
+			}
+			cfg.Port = port
+		} else if cfg.Port <= 0 {
 			return Config{}, errors.New("port is required")
 		}
-		port, err := randomPort()
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.Port = port
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return Config{}, errors.New("port must be in range 1-65535")
@@ -1137,7 +1141,7 @@ func applyConfigDefaults(cfg Config) Config {
 	if strings.TrimSpace(cfg.Listen) == "" {
 		cfg.Listen = def.Listen
 	}
-	if cfg.Port <= 0 {
+	if cfg.Port <= 0 && def.Port > 0 {
 		cfg.Port = def.Port
 	}
 	if strings.TrimSpace(cfg.Flow) == "" {
@@ -1160,7 +1164,7 @@ func applyConfigDefaults(cfg Config) Config {
 func defaultConfig() Config {
 	return Config{
 		Listen:      "0.0.0.0",
-		Port:        443,
+		Port:        0,
 		Flow:        "xtls-rprx-vision",
 		Dest:        "www.yahoo.com:443",
 		ServerNames: []string{"www.yahoo.com"},

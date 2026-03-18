@@ -21,6 +21,7 @@ import (
 	"cm-agent/internal/realm"
 	"cm-agent/internal/selfupdate"
 	"cm-agent/internal/ssrust"
+	"cm-agent/internal/xray"
 
 	"github.com/gorilla/websocket"
 )
@@ -145,6 +146,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 	}
 	var updating atomic.Bool
 	var ssrustUpdating atomic.Bool
+	var xrayUpdating atomic.Bool
 	var realmUpdating atomic.Bool
 
 	var wg sync.WaitGroup
@@ -266,6 +268,30 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 					defer ssrustUpdating.Store(false)
 				}
 				handleSSRustTask(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
+		case "xray_task":
+			action := strings.ToLower(strings.TrimSpace(msg.XrayAction))
+			if action != "status" && !xrayUpdating.CompareAndSwap(false, true) {
+				_ = writeJSON(XrayTaskResultMessage{
+					Type:         "xray_task_result",
+					RequestID:    msg.XrayRequestID,
+					Action:       msg.XrayAction,
+					Success:      false,
+					Error:        "another xray task is running",
+					ServiceName:  "xray",
+					BinaryPath:   "/usr/local/bin/xray",
+					ConfigPath:   "/etc/xray/config.json",
+					StartedAtMs:  time.Now().UnixMilli(),
+					FinishedAtMs: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			go func(m ControlMessage) {
+				if action != "status" {
+					defer xrayUpdating.Store(false)
+				}
+				handleXrayTask(ctx, cfg, m, writeJSON)
 			}(msg)
 			continue
 		case "realm_task":
@@ -390,6 +416,42 @@ func handleSSRustTask(
 	}
 	if err := writeJSON(out); err != nil {
 		cfg.Logger.Warn("send ssrust task result failed", "err", err, "request_id", msg.SSRustRequestID, "action", msg.SSRustAction)
+	}
+}
+
+func handleXrayTask(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	manager := xray.NewManager(cfg.Logger.With("component", "xray"))
+	res := manager.Execute(ctx, xray.Request{
+		RequestID:    msg.XrayRequestID,
+		Action:       msg.XrayAction,
+		Version:      msg.XrayVersion,
+		OpenFirewall: msg.XrayOpenFirewall,
+		Config:       msg.XrayConfig,
+	})
+	out := XrayTaskResultMessage{
+		Type:         "xray_task_result",
+		RequestID:    res.RequestID,
+		Action:       res.Action,
+		Success:      res.Success,
+		Error:        res.Error,
+		Message:      res.Message,
+		Installed:    res.Installed,
+		Running:      res.Running,
+		Version:      res.Version,
+		Config:       res.Config,
+		ServiceName:  res.ServiceName,
+		BinaryPath:   res.BinaryPath,
+		ConfigPath:   res.ConfigPath,
+		StartedAtMs:  res.StartedAtMs,
+		FinishedAtMs: res.FinishedAtMs,
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send xray task result failed", "err", err, "request_id", msg.XrayRequestID, "action", msg.XrayAction)
 	}
 }
 

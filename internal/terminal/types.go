@@ -196,6 +196,12 @@ type XrayTaskResultMessage struct {
 	Version   string       `json:"version,omitempty"`
 	Config    *xray.Config `json:"config,omitempty"`
 
+	ConfigValid      *bool  `json:"config_valid,omitempty"`
+	ValidateMessage  string `json:"validate_message,omitempty"`
+	ListenReachable  *bool  `json:"listen_reachable,omitempty"`
+	ListenTestTarget string `json:"listen_test_target,omitempty"`
+	ListenError      string `json:"listen_error,omitempty"`
+
 	ServiceName string `json:"service_name,omitempty"`
 	BinaryPath  string `json:"binary_path,omitempty"`
 	ConfigPath  string `json:"config_path,omitempty"`

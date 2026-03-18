@@ -71,12 +71,28 @@ type Result struct {
 	Version   string  `json:"version,omitempty"`
 	Config    *Config `json:"config,omitempty"`
 
+	ConfigValid      *bool  `json:"config_valid,omitempty"`
+	ValidateMessage  string `json:"validate_message,omitempty"`
+	ListenReachable  *bool  `json:"listen_reachable,omitempty"`
+	ListenTestTarget string `json:"listen_test_target,omitempty"`
+	ListenError      string `json:"listen_error,omitempty"`
+
 	ServiceName string `json:"service_name,omitempty"`
 	BinaryPath  string `json:"binary_path,omitempty"`
 	ConfigPath  string `json:"config_path,omitempty"`
 
 	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
 	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type checkOutcome struct {
+	Config           *Config
+	ConfigValid      *bool
+	ValidateMessage  string
+	ListenReachable  *bool
+	ListenTestTarget string
+	ListenError      string
+	Message          string
 }
 
 type statusSnapshot struct {
@@ -223,6 +239,34 @@ func (m *Manager) Execute(ctx context.Context, req Request) Result {
 		} else {
 			res.Success = true
 		}
+	case "validate":
+		outcome, err := m.validate(ctx, req)
+		res.Config = outcome.Config
+		res.ConfigValid = outcome.ConfigValid
+		res.ValidateMessage = outcome.ValidateMessage
+		res.ListenReachable = outcome.ListenReachable
+		res.ListenTestTarget = outcome.ListenTestTarget
+		res.ListenError = outcome.ListenError
+		res.Message = outcome.Message
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Success = true
+		}
+	case "self_check":
+		outcome, err := m.selfCheck(ctx)
+		res.Config = outcome.Config
+		res.ConfigValid = outcome.ConfigValid
+		res.ValidateMessage = outcome.ValidateMessage
+		res.ListenReachable = outcome.ListenReachable
+		res.ListenTestTarget = outcome.ListenTestTarget
+		res.ListenError = outcome.ListenError
+		res.Message = outcome.Message
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Success = true
+		}
 	default:
 		res.Error = "unsupported action"
 	}
@@ -239,7 +283,9 @@ func (m *Manager) Execute(ctx context.Context, req Request) Result {
 	res.Installed = status.Installed
 	res.Running = status.Running
 	res.Version = status.Version
-	res.Config = status.Config
+	if res.Config == nil {
+		res.Config = status.Config
+	}
 	return res
 }
 
@@ -251,6 +297,10 @@ func (m *Manager) install(ctx context.Context, req Request) (string, error) {
 	version, err := m.installBinary(ctx, strings.TrimSpace(req.Version))
 	if err != nil {
 		return "", err
+	}
+	validateMessage, err := m.validateRuntimeConfig(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("xray config validation failed before install: %w", err)
 	}
 	if err := writeConfig(cfg); err != nil {
 		return "", err
@@ -270,7 +320,16 @@ func (m *Manager) install(ctx context.Context, req Request) (string, error) {
 		}
 	}
 
-	message := "installed xray " + version
+	listenTarget, listenErr := selfCheckListen(ctx, cfg, 6, time.Second)
+	if listenErr != nil {
+		return "", fmt.Errorf("xray listen self-check failed after install: %w", listenErr)
+	}
+
+	message := joinMessages(
+		"installed xray "+version,
+		validateMessage,
+		"listen reachable via "+listenTarget,
+	)
 	if req.OpenFirewall {
 		if note, err := openFirewallPort(ctx, cfg.Port); err != nil {
 			message = joinMessages(message, "firewall warning: "+err.Error())
@@ -289,6 +348,10 @@ func (m *Manager) configure(ctx context.Context, req Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	validateMessage, err := m.validateRuntimeConfig(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("xray config validation failed before apply: %w", err)
+	}
 	if err := writeConfig(cfg); err != nil {
 		return "", err
 	}
@@ -297,7 +360,15 @@ func (m *Manager) configure(ctx context.Context, req Request) (string, error) {
 			return "", err
 		}
 	}
-	message := "configuration applied"
+	listenTarget, listenErr := selfCheckListen(ctx, cfg, 6, time.Second)
+	if listenErr != nil {
+		return "", fmt.Errorf("xray listen self-check failed after apply: %w", listenErr)
+	}
+	message := joinMessages(
+		"configuration applied",
+		validateMessage,
+		"listen reachable via "+listenTarget,
+	)
 	if req.OpenFirewall {
 		if note, err := openFirewallPort(ctx, cfg.Port); err != nil {
 			message = joinMessages(message, "firewall warning: "+err.Error())
@@ -757,6 +828,203 @@ func runCmd(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
+func (m *Manager) validate(ctx context.Context, req Request) (checkOutcome, error) {
+	if req.Config == nil {
+		return checkOutcome{}, errors.New("xray config is required")
+	}
+	cfg, err := normalizeConfig(req.Config, false)
+	if err != nil {
+		return checkOutcome{}, err
+	}
+	outcome := checkOutcome{Config: &cfg}
+	msg, err := m.validateRuntimeConfig(ctx, cfg)
+	outcome.ConfigValid = boolPtr(err == nil)
+	outcome.ValidateMessage = msg
+	if err != nil {
+		outcome.Message = "configuration validation failed"
+		return outcome, err
+	}
+	outcome.Message = "configuration is valid"
+	return outcome, nil
+}
+
+func (m *Manager) selfCheck(ctx context.Context) (checkOutcome, error) {
+	cfg, err := readConfig()
+	if err != nil {
+		return checkOutcome{}, err
+	}
+	outcome := checkOutcome{Config: cfg}
+	validateMsg, validateErr := m.validateConfigFile(ctx, configPath)
+	outcome.ConfigValid = boolPtr(validateErr == nil)
+	outcome.ValidateMessage = validateMsg
+
+	listenTarget, listenErr := selfCheckListen(ctx, *cfg, 2, 500*time.Millisecond)
+	outcome.ListenReachable = boolPtr(listenErr == nil)
+	outcome.ListenTestTarget = listenTarget
+	if listenErr != nil {
+		outcome.ListenError = listenErr.Error()
+	}
+	outcome.Message = describeSelfCheck(validateErr == nil, listenErr == nil)
+
+	var errs []string
+	if validateErr != nil {
+		errs = append(errs, "config validation failed: "+validateErr.Error())
+	}
+	if listenErr != nil {
+		errs = append(errs, "listen self-check failed: "+listenErr.Error())
+	}
+	if len(errs) > 0 {
+		return outcome, errors.New(strings.Join(errs, "; "))
+	}
+	return outcome, nil
+}
+
+func (m *Manager) validateRuntimeConfig(ctx context.Context, cfg Config) (string, error) {
+	tmpFile, err := os.CreateTemp("", "xray-config-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create temp config: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	payload, err := json.MarshalIndent(buildRuntimeConfig(cfg), "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal temp config: %w", err)
+	}
+	payload = append(payload, '\n')
+	if err := os.WriteFile(tmpPath, payload, 0o600); err != nil {
+		return "", fmt.Errorf("write temp config: %w", err)
+	}
+	return m.validateConfigFile(ctx, tmpPath)
+}
+
+func (m *Manager) validateConfigFile(ctx context.Context, filePath string) (string, error) {
+	if _, err := os.Stat(binaryPath); err != nil {
+		return "", errors.New("xray is not installed")
+	}
+	cmd := exec.CommandContext(ctx, binaryPath, "run", "-test", "-config", filePath)
+	output, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(output))
+	if err != nil {
+		if msg == "" {
+			msg = err.Error()
+		}
+		return msg, fmt.Errorf("xray run -test failed: %s", msg)
+	}
+	if msg == "" {
+		msg = "xray run -test passed"
+	}
+	return msg, nil
+}
+
+func selfCheckListen(ctx context.Context, cfg Config, attempts int, interval time.Duration) (string, error) {
+	candidates, err := buildListenCandidates(cfg.Listen, cfg.Port)
+	if err != nil {
+		return "", err
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	var errs []string
+	for attempt := 0; attempt < attempts; attempt++ {
+		errThisRound := errs[:0]
+		for _, candidate := range candidates {
+			if err := testTCPDial(ctx, candidate); err == nil {
+				return candidate, nil
+			} else {
+				errThisRound = append(errThisRound, fmt.Sprintf("%s (%s)", candidate, err.Error()))
+			}
+		}
+		errs = append([]string(nil), errThisRound...)
+		if attempt+1 < attempts && interval > 0 {
+			if err := sleepWithContext(ctx, interval); err != nil {
+				break
+			}
+		}
+	}
+	return firstNonEmpty(candidates...), errors.New(strings.Join(errs, "; "))
+}
+
+func buildListenCandidates(listen string, port int) ([]string, error) {
+	host := strings.TrimSpace(listen)
+	if host == "" {
+		return nil, errors.New("listen is required")
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid port %d", port)
+	}
+	joined := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	parsedHost, parsedPort, err := net.SplitHostPort(joined)
+	if err != nil {
+		return nil, err
+	}
+	switch parsedHost {
+	case "0.0.0.0":
+		return []string{net.JoinHostPort("127.0.0.1", parsedPort)}, nil
+	case "::":
+		return []string{
+			net.JoinHostPort("::1", parsedPort),
+			net.JoinHostPort("127.0.0.1", parsedPort),
+		}, nil
+	default:
+		return []string{net.JoinHostPort(parsedHost, parsedPort)}, nil
+	}
+}
+
+func testTCPDial(ctx context.Context, address string) error {
+	timeout := 3 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", strings.TrimSpace(address))
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func sleepWithContext(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func describeSelfCheck(configValid, listenReachable bool) string {
+	switch {
+	case configValid && listenReachable:
+		return "config is valid and listen is reachable"
+	case configValid && !listenReachable:
+		return "config is valid but listen is unreachable"
+	case !configValid && listenReachable:
+		return "config is invalid but listen is reachable"
+	default:
+		return "config is invalid and listen is unreachable"
+	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func normalizeConfig(input *Config, allowGenerated bool) (Config, error) {
 	cfg := defaultConfig()
 	if input != nil {
@@ -894,8 +1162,8 @@ func defaultConfig() Config {
 		Listen:      "0.0.0.0",
 		Port:        443,
 		Flow:        "xtls-rprx-vision",
-		Dest:        "www.microsoft.com:443",
-		ServerNames: []string{"www.microsoft.com"},
+		Dest:        "www.yahoo.com:443",
+		ServerNames: []string{"www.yahoo.com"},
 		Fingerprint: "chrome",
 	}
 }

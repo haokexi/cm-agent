@@ -41,11 +41,6 @@ probes:
   tcp:
     - "10.0.0.2:443"
 
-stream_unlock:
-  enabled: true
-  interval: 1h
-  timeout: 10s
-
 terminal:
   enabled: false
   # Only specify server base address; agent derives:

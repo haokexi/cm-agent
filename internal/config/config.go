@@ -56,12 +56,6 @@ type Config struct {
 		TCP     []string `yaml:"tcp"`
 	} `yaml:"probes"`
 
-	StreamUnlock struct {
-		Enabled  bool     `yaml:"enabled"`
-		Interval Duration `yaml:"interval"`
-		Timeout  Duration `yaml:"timeout"`
-	} `yaml:"stream_unlock"`
-
 	Terminal struct {
 		Enabled bool `yaml:"enabled"`
 

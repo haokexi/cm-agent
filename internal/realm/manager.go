@@ -412,13 +412,13 @@ func renderConfig(cfg Config) ([]byte, error) {
 		return nil, err
 	}
 	var b strings.Builder
+	if len(cfg.Endpoints) == 0 {
+		b.WriteString("endpoints = []\n\n")
+	}
 	b.WriteString("[network]\n")
 	fmt.Fprintf(&b, "no_tcp = %t\n", cfg.Network.NoTCP)
 	fmt.Fprintf(&b, "use_udp = %t\n", cfg.Network.UseUDP)
 	fmt.Fprintf(&b, "ipv6_only = %t\n", cfg.Network.IPv6Only)
-	if len(cfg.Endpoints) == 0 {
-		b.WriteString("\nendpoints = []\n")
-	}
 	for _, ep := range cfg.Endpoints {
 		b.WriteString("\n")
 		if strings.TrimSpace(ep.Remark) != "" {

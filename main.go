@@ -79,7 +79,7 @@ func main() {
 		interval = kingpin.Flag(
 			"scrape.interval",
 			"Collection interval. This agent does not open a local /metrics endpoint.",
-		).Envar("CM_SCRAPE_INTERVAL").Default("15s").Duration()
+		).Envar("CM_SCRAPE_INTERVAL").Default("30s").Duration()
 
 		job = kingpin.Flag(
 			"job",
@@ -832,7 +832,7 @@ func applyConfigDefaults(
 	if *flushMaxFiles == 200 && cfg.RemoteWrite.Flush.MaxFiles > 0 {
 		*flushMaxFiles = cfg.RemoteWrite.Flush.MaxFiles
 	}
-	if *interval == 15*time.Second && cfg.Scrape.Interval.Duration > 0 {
+	if *interval == 30*time.Second && cfg.Scrape.Interval.Duration > 0 {
 		*interval = cfg.Scrape.Interval.Duration
 	}
 	if *job == "node" && cfg.Labels.Job != "" {

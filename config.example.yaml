@@ -2,7 +2,7 @@ log:
   level: info
 
 scrape:
-  interval: 15s
+  interval: 30s
 
 collectors:
   disable_defaults: false

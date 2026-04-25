@@ -562,12 +562,14 @@ type managedLabelState struct {
 }
 
 type managedProbeRule struct {
-	RuleID     string
-	Module     string
-	Target     string
-	IPProtocol string
-	Interval   time.Duration
-	Timeout    time.Duration
+	RuleID         string
+	Module         string
+	Target         string
+	IPProtocol     string
+	Interval       time.Duration
+	Timeout        time.Duration
+	Count          int
+	PacketInterval time.Duration
 }
 
 type managedProbeState struct {
@@ -627,11 +629,13 @@ func (s *managedProbeState) DueTargets(now time.Time) []probe.Target {
 		}
 		s.lastRun[rid] = now
 		out = append(out, probe.Target{
-			Module:     rule.Module,
-			Instance:   rule.Target,
-			IPProtocol: rule.IPProtocol,
-			RuleID:     rid,
-			Timeout:    rule.Timeout,
+			Module:         rule.Module,
+			Instance:       rule.Target,
+			IPProtocol:     rule.IPProtocol,
+			RuleID:         rid,
+			Timeout:        rule.Timeout,
+			Count:          rule.Count,
+			PacketInterval: rule.PacketInterval,
 		})
 	}
 	return out
@@ -690,13 +694,24 @@ func normalizeManagedProbeRules(in []terminal.ProbeRule, defaultTimeout time.Dur
 			timeout = 2 * time.Second
 		}
 
+		count := raw.Count
+		if count <= 0 {
+			count = 5
+		}
+		packetInterval := 200 * time.Millisecond
+		if raw.PacketIntervalMs > 0 {
+			packetInterval = time.Duration(raw.PacketIntervalMs) * time.Millisecond
+		}
+
 		out = append(out, managedProbeRule{
-			RuleID:     rid,
-			Module:     module,
-			Target:     target,
-			IPProtocol: ipProtocol,
-			Interval:   time.Duration(intervalSec) * time.Second,
-			Timeout:    timeout,
+			RuleID:         rid,
+			Module:         module,
+			Target:         target,
+			IPProtocol:     ipProtocol,
+			Interval:       time.Duration(intervalSec) * time.Second,
+			Timeout:        timeout,
+			Count:          count,
+			PacketInterval: packetInterval,
 		})
 	}
 	return out

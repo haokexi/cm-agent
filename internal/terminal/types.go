@@ -81,6 +81,9 @@ type ProbeRule struct {
 	IntervalSeconds int    `json:"interval_seconds,omitempty"`
 	TimeoutMs       int    `json:"timeout_ms,omitempty"`
 	Enabled         bool   `json:"enabled,omitempty"`
+
+	Count            int `json:"count,omitempty"`              // ICMP packets per probe, default 5
+	PacketIntervalMs int `json:"packet_interval_ms,omitempty"` // ms between packets, default 200
 }
 
 type ResizeMessage struct {

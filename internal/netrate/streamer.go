@@ -34,7 +34,7 @@ type devCounters struct {
 }
 
 var virtualDeviceRE = regexp.MustCompile(
-	`^(lo|docker\d*|veth[a-f0-9]+|br-[a-f0-9]+|virbr\d+|cni\d+|flannel\.\d+|cali[a-f0-9]+|tunl\d+|kube-.*|dummy\d*)$`,
+	`^(lo|docker\d*|veth[a-f0-9]+|br-[a-f0-9]+|virbr\d+|cni\d+|flannel\.\d+|cali[a-f0-9]+|tunl\d+|kube-.*|dummy\d*|sit\d+|gre\d+|ip6tnl\d+|ip6gre\d+)$`,
 )
 
 // Streamer reads /proc/net/dev at 1-second intervals and emits computed rates.

@@ -33,8 +33,9 @@ type devCounters struct {
 	txBytes uint64
 }
 
-var virtualDeviceRE = regexp.MustCompile(
-	`^(lo|docker\d*|veth[a-f0-9]+|br-[a-f0-9]+|virbr\d+|cni\d+|flannel\.\d+|cali[a-f0-9]+|tunl\d+|kube-.*|dummy\d*|sit\d+|gre\d+|ip6tnl\d+|ip6gre\d+)$`,
+// physicalDeviceRE matches physical/bonded/wifi NICs and rejects all virtual/tunnel devices.
+var physicalDeviceRE = regexp.MustCompile(
+	`^(eth\d+|en[a-z0-9]+|bond\d+|wlan\d+|wlp[a-z0-9]+)$`,
 )
 
 // Streamer reads /proc/net/dev at 1-second intervals and emits computed rates.
@@ -98,7 +99,7 @@ func (s *Streamer) run(stopCh <-chan struct{}, emit EmitFunc) {
 
 			var rates []DeviceRate
 			for dev, cc := range cur {
-				if virtualDeviceRE.MatchString(dev) {
+				if !physicalDeviceRE.MatchString(dev) {
 					continue
 				}
 				pc, ok := prev[dev]

@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,8 +141,8 @@ func RunClient(
 		dirByte = 'R'
 	}
 
-	// Connect all streams.
-	addr := fmt.Sprintf("%s:%d", host, port)
+	// Connect all streams. net.JoinHostPort brackets IPv6 literals correctly.
+	addr := net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
 	conns := make([]net.Conn, 0, parallel)
 	for i := 0; i < parallel; i++ {
 		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)

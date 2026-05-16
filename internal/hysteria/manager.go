@@ -361,14 +361,19 @@ func (m *Manager) downloadAsset(ctx context.Context, version, assetName, outPath
 }
 
 func ensureCertificate(ctx context.Context, cfg *Config) error {
-	if strings.TrimSpace(cfg.CertPath) != "" && strings.TrimSpace(cfg.KeyPath) != "" {
+	cfg.CertPath = strings.TrimSpace(cfg.CertPath)
+	cfg.KeyPath = strings.TrimSpace(cfg.KeyPath)
+	if cfg.CertPath == "" {
+		cfg.CertPath = certPath
+	}
+	if cfg.KeyPath == "" {
+		cfg.KeyPath = keyPath
+	}
+	if certificatePairExists(cfg.CertPath, cfg.KeyPath) {
 		return nil
 	}
-	cfg.CertPath, cfg.KeyPath = certPath, keyPath
-	if _, certErr := os.Stat(certPath); certErr == nil {
-		if _, keyErr := os.Stat(keyPath); keyErr == nil {
-			return nil
-		}
+	if !isManagedCertificatePath(cfg.CertPath, cfg.KeyPath) {
+		return fmt.Errorf("tls certificate/key not found: cert=%s key=%s", cfg.CertPath, cfg.KeyPath)
 	}
 	if _, err := exec.LookPath("openssl"); err != nil {
 		return errors.New("openssl is required to generate self-signed certificate")
@@ -376,7 +381,7 @@ func ensureCertificate(ctx context.Context, cfg *Config) error {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		return fmt.Errorf("create hysteria dir: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath, "-subj", "/CN=www.bing.com", "-days", "36500")
+	cmd := exec.CommandContext(ctx, "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-keyout", cfg.KeyPath, "-out", cfg.CertPath, "-subj", "/CN=www.bing.com", "-days", "36500")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -384,9 +389,23 @@ func ensureCertificate(ctx context.Context, cfg *Config) error {
 		}
 		return fmt.Errorf("generate self-signed certificate: %s", msg)
 	}
-	_ = os.Chmod(keyPath, 0o600)
-	_ = os.Chmod(certPath, 0o644)
+	_ = os.Chmod(cfg.KeyPath, 0o600)
+	_ = os.Chmod(cfg.CertPath, 0o644)
 	return nil
+}
+
+func certificatePairExists(certFile, keyFile string) bool {
+	if _, err := os.Stat(certFile); err != nil {
+		return false
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		return false
+	}
+	return true
+}
+
+func isManagedCertificatePath(certFile, keyFile string) bool {
+	return strings.TrimSpace(certFile) == certPath && strings.TrimSpace(keyFile) == keyPath
 }
 
 func writeConfig(cfg Config) error {

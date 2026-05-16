@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cm-agent/internal/hysteria"
 	"cm-agent/internal/netrate"
 	"cm-agent/internal/realm"
 	"cm-agent/internal/selfupdate"
@@ -147,6 +148,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 	var updating atomic.Bool
 	var ssrustUpdating atomic.Bool
 	var xrayUpdating atomic.Bool
+	var hysteriaUpdating atomic.Bool
 	var realmUpdating atomic.Bool
 
 	var wg sync.WaitGroup
@@ -292,6 +294,30 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 					defer xrayUpdating.Store(false)
 				}
 				handleXrayTask(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
+		case "hysteria_task":
+			action := strings.ToLower(strings.TrimSpace(msg.HysteriaAction))
+			if action != "status" && !hysteriaUpdating.CompareAndSwap(false, true) {
+				_ = writeJSON(HysteriaTaskResultMessage{
+					Type:         "hysteria_task_result",
+					RequestID:    msg.HysteriaRequestID,
+					Action:       msg.HysteriaAction,
+					Success:      false,
+					Error:        "another hysteria task is running",
+					ServiceName:  "hysteria-server",
+					BinaryPath:   "/usr/local/bin/hysteria",
+					ConfigPath:   "/etc/hysteria/config.yaml",
+					StartedAtMs:  time.Now().UnixMilli(),
+					FinishedAtMs: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			go func(m ControlMessage) {
+				if action != "status" {
+					defer hysteriaUpdating.Store(false)
+				}
+				handleHysteriaTask(ctx, cfg, m, writeJSON)
 			}(msg)
 			continue
 		case "realm_task":
@@ -457,6 +483,42 @@ func handleXrayTask(
 	}
 	if err := writeJSON(out); err != nil {
 		cfg.Logger.Warn("send xray task result failed", "err", err, "request_id", msg.XrayRequestID, "action", msg.XrayAction)
+	}
+}
+
+func handleHysteriaTask(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	manager := hysteria.NewManager(cfg.Logger.With("component", "hysteria"))
+	res := manager.Execute(ctx, hysteria.Request{
+		RequestID:    msg.HysteriaRequestID,
+		Action:       msg.HysteriaAction,
+		Version:      msg.HysteriaVersion,
+		OpenFirewall: msg.HysteriaOpenFirewall,
+		Config:       msg.HysteriaConfig,
+	})
+	out := HysteriaTaskResultMessage{
+		Type:         "hysteria_task_result",
+		RequestID:    res.RequestID,
+		Action:       res.Action,
+		Success:      res.Success,
+		Error:        res.Error,
+		Message:      res.Message,
+		Installed:    res.Installed,
+		Running:      res.Running,
+		Version:      res.Version,
+		Config:       res.Config,
+		ServiceName:  res.ServiceName,
+		BinaryPath:   res.BinaryPath,
+		ConfigPath:   res.ConfigPath,
+		StartedAtMs:  res.StartedAtMs,
+		FinishedAtMs: res.FinishedAtMs,
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send hysteria task result failed", "err", err, "request_id", msg.HysteriaRequestID, "action", msg.HysteriaAction)
 	}
 }
 

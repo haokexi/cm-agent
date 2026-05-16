@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"cm-agent/internal/hysteria"
 	"cm-agent/internal/realm"
 	"cm-agent/internal/ssrust"
 	"cm-agent/internal/xray"
@@ -60,6 +61,13 @@ type ControlMessage struct {
 	XrayVersion      string       `json:"xray_version,omitempty"`
 	XrayOpenFirewall bool         `json:"xray_open_firewall,omitempty"`
 	XrayConfig       *xray.Config `json:"xray_config,omitempty"`
+
+	// Used by hysteria_task control message.
+	HysteriaRequestID    string           `json:"hysteria_request_id,omitempty"`
+	HysteriaAction       string           `json:"hysteria_action,omitempty"`
+	HysteriaVersion      string           `json:"hysteria_version,omitempty"`
+	HysteriaOpenFirewall bool             `json:"hysteria_open_firewall,omitempty"`
+	HysteriaConfig       *hysteria.Config `json:"hysteria_config,omitempty"`
 
 	// Used by realm_task control message.
 	RealmRequestID string        `json:"realm_request_id,omitempty"`
@@ -201,6 +209,29 @@ type XrayTaskResultMessage struct {
 	ListenReachable  *bool  `json:"listen_reachable,omitempty"`
 	ListenTestTarget string `json:"listen_test_target,omitempty"`
 	ListenError      string `json:"listen_error,omitempty"`
+
+	ServiceName string `json:"service_name,omitempty"`
+	BinaryPath  string `json:"binary_path,omitempty"`
+	ConfigPath  string `json:"config_path,omitempty"`
+
+	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type HysteriaTaskResultMessage struct {
+	Type string `json:"type"` // hysteria_task_result
+
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action,omitempty"`
+
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	Installed bool             `json:"installed"`
+	Running   bool             `json:"running"`
+	Version   string           `json:"version,omitempty"`
+	Config    *hysteria.Config `json:"config,omitempty"`
 
 	ServiceName string `json:"service_name,omitempty"`
 	BinaryPath  string `json:"binary_path,omitempty"`

@@ -226,6 +226,12 @@ func (m *Manager) configure(ctx context.Context, req Request) (string, error) {
 	if err := writeMeta(cfg); err != nil {
 		return "", err
 	}
+	if err := installServiceFile(); err != nil {
+		return "", err
+	}
+	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
+		return "", err
+	}
 	if err := restartService(ctx); err != nil {
 		return "", err
 	}
@@ -436,12 +442,45 @@ func readConfig() (*Config, error) {
 }
 
 func installServiceFile() error {
-	content := strings.Join([]string{"[Unit]", "Description=Hysteria Server Service", "After=network-online.target", "Wants=network-online.target", "", "[Service]", "Type=simple", "User=root", "ExecStart=" + binaryPath + " server -c " + configPath, "Restart=on-failure", "RestartSec=3s", "LimitNOFILE=1048576", "", "[Install]", "WantedBy=multi-user.target", ""}, "\n")
+	content := strings.Join([]string{
+		"[Unit]",
+		"Description=Hysteria Server Service",
+		"After=network-online.target",
+		"Wants=network-online.target",
+		"",
+		"[Service]",
+		"Type=simple",
+		"User=root",
+		"ExecStart=" + binaryPath + " server -c " + configPath,
+		"Restart=on-failure",
+		"RestartSec=3s",
+		"LimitNOFILE=1048576",
+		"",
+		"[Install]",
+		"WantedBy=multi-user.target",
+		"",
+	}, "\n")
 	return os.WriteFile(serviceFile, []byte(content), 0o644)
 }
-func startService(ctx context.Context) error   { return runSystemctl(ctx, "start", serviceName) }
-func stopService(ctx context.Context) error    { return runSystemctl(ctx, "stop", serviceName) }
-func restartService(ctx context.Context) error { return runSystemctl(ctx, "restart", serviceName) }
+func startService(ctx context.Context) error {
+	if err := installServiceFile(); err != nil {
+		return err
+	}
+	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	return runSystemctl(ctx, "start", serviceName)
+}
+func stopService(ctx context.Context) error { return runSystemctl(ctx, "stop", serviceName) }
+func restartService(ctx context.Context) error {
+	if err := installServiceFile(); err != nil {
+		return err
+	}
+	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	return runSystemctl(ctx, "restart", serviceName)
+}
 func uninstall(ctx context.Context) (string, error) {
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		_ = runSystemctl(ctx, "stop", serviceName)

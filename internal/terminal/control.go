@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cm-agent/internal/dante"
 	"cm-agent/internal/hysteria"
 	"cm-agent/internal/netrate"
 	"cm-agent/internal/realm"
@@ -149,6 +150,7 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 	var ssrustUpdating atomic.Bool
 	var xrayUpdating atomic.Bool
 	var hysteriaUpdating atomic.Bool
+	var danteUpdating atomic.Bool
 	var realmUpdating atomic.Bool
 
 	var wg sync.WaitGroup
@@ -318,6 +320,30 @@ func runControlOnce(ctx context.Context, cfg AgentConfig, sem chan struct{}) err
 					defer hysteriaUpdating.Store(false)
 				}
 				handleHysteriaTask(ctx, cfg, m, writeJSON)
+			}(msg)
+			continue
+		case "dante_task":
+			action := strings.ToLower(strings.TrimSpace(msg.DanteAction))
+			if action != "status" && !danteUpdating.CompareAndSwap(false, true) {
+				_ = writeJSON(DanteTaskResultMessage{
+					Type:         "dante_task_result",
+					RequestID:    msg.DanteRequestID,
+					Action:       msg.DanteAction,
+					Success:      false,
+					Error:        "another dante task is running",
+					ServiceName:  "danted",
+					BinaryPath:   "/usr/sbin/sockd",
+					ConfigPath:   "/etc/danted.conf",
+					StartedAtMs:  time.Now().UnixMilli(),
+					FinishedAtMs: time.Now().UnixMilli(),
+				})
+				continue
+			}
+			go func(m ControlMessage) {
+				if action != "status" {
+					defer danteUpdating.Store(false)
+				}
+				handleDanteTask(ctx, cfg, m, writeJSON)
 			}(msg)
 			continue
 		case "realm_task":
@@ -519,6 +545,41 @@ func handleHysteriaTask(
 	}
 	if err := writeJSON(out); err != nil {
 		cfg.Logger.Warn("send hysteria task result failed", "err", err, "request_id", msg.HysteriaRequestID, "action", msg.HysteriaAction)
+	}
+}
+
+func handleDanteTask(
+	ctx context.Context,
+	cfg AgentConfig,
+	msg ControlMessage,
+	writeJSON func(v any) error,
+) {
+	manager := dante.NewManager(cfg.Logger.With("component", "dante"))
+	res := manager.Execute(ctx, dante.Request{
+		RequestID:    msg.DanteRequestID,
+		Action:       msg.DanteAction,
+		OpenFirewall: msg.DanteOpenFirewall,
+		Config:       msg.DanteConfig,
+	})
+	out := DanteTaskResultMessage{
+		Type:         "dante_task_result",
+		RequestID:    res.RequestID,
+		Action:       res.Action,
+		Success:      res.Success,
+		Error:        res.Error,
+		Message:      res.Message,
+		Installed:    res.Installed,
+		Running:      res.Running,
+		Version:      res.Version,
+		Config:       res.Config,
+		ServiceName:  res.ServiceName,
+		BinaryPath:   res.BinaryPath,
+		ConfigPath:   res.ConfigPath,
+		StartedAtMs:  res.StartedAtMs,
+		FinishedAtMs: res.FinishedAtMs,
+	}
+	if err := writeJSON(out); err != nil {
+		cfg.Logger.Warn("send dante task result failed", "err", err, "request_id", msg.DanteRequestID, "action", msg.DanteAction)
 	}
 }
 

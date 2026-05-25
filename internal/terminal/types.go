@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"cm-agent/internal/dante"
 	"cm-agent/internal/hysteria"
 	"cm-agent/internal/realm"
 	"cm-agent/internal/ssrust"
@@ -68,6 +69,12 @@ type ControlMessage struct {
 	HysteriaVersion      string           `json:"hysteria_version,omitempty"`
 	HysteriaOpenFirewall bool             `json:"hysteria_open_firewall,omitempty"`
 	HysteriaConfig       *hysteria.Config `json:"hysteria_config,omitempty"`
+
+	// Used by dante_task control message.
+	DanteRequestID    string        `json:"dante_request_id,omitempty"`
+	DanteAction       string        `json:"dante_action,omitempty"`
+	DanteOpenFirewall bool          `json:"dante_open_firewall,omitempty"`
+	DanteConfig       *dante.Config `json:"dante_config,omitempty"`
 
 	// Used by realm_task control message.
 	RealmRequestID string        `json:"realm_request_id,omitempty"`
@@ -232,6 +239,29 @@ type HysteriaTaskResultMessage struct {
 	Running   bool             `json:"running"`
 	Version   string           `json:"version,omitempty"`
 	Config    *hysteria.Config `json:"config,omitempty"`
+
+	ServiceName string `json:"service_name,omitempty"`
+	BinaryPath  string `json:"binary_path,omitempty"`
+	ConfigPath  string `json:"config_path,omitempty"`
+
+	StartedAtMs  int64 `json:"started_at_ms,omitempty"`
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+type DanteTaskResultMessage struct {
+	Type string `json:"type"` // dante_task_result
+
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action,omitempty"`
+
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	Installed bool          `json:"installed"`
+	Running   bool          `json:"running"`
+	Version   string        `json:"version,omitempty"`
+	Config    *dante.Config `json:"config,omitempty"`
 
 	ServiceName string `json:"service_name,omitempty"`
 	BinaryPath  string `json:"binary_path,omitempty"`

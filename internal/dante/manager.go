@@ -217,16 +217,57 @@ func installPackage(ctx context.Context) error {
 		return nil
 	}
 	if _, err := exec.LookPath("apt-get"); err == nil {
-		_ = runCmd(ctx, "apt-get", "update")
-		return runCmd(ctx, "apt-get", "install", "-y", "dante-server")
+		return installPackageApt(ctx)
 	}
 	if _, err := exec.LookPath("dnf"); err == nil {
-		return runCmd(ctx, "dnf", "install", "-y", "dante-server")
+		if err := runCmd(ctx, "dnf", "install", "-y", "dante-server"); err != nil {
+			return fmt.Errorf("install dante-server failed; on RHEL/CentOS enable EPEL first: %w", err)
+		}
+		return nil
 	}
 	if _, err := exec.LookPath("yum"); err == nil {
-		return runCmd(ctx, "yum", "install", "-y", "dante-server")
+		if err := runCmd(ctx, "yum", "install", "-y", "dante-server"); err != nil {
+			return fmt.Errorf("install dante-server failed; on RHEL/CentOS enable EPEL first: %w", err)
+		}
+		return nil
 	}
 	return errors.New("no supported package manager found (apt-get/dnf/yum)")
+}
+
+func installPackageApt(ctx context.Context) error {
+	_ = runCmd(ctx, "apt-get", "update")
+	if err := runCmd(ctx, "apt-get", "install", "-y", "dante-server"); err == nil {
+		return nil
+	} else {
+		firstErr := err
+		// Ubuntu keeps dante-server in the universe repository; minimal images often do not enable it.
+		if isUbuntuHost() {
+			if _, lookErr := exec.LookPath("add-apt-repository"); lookErr != nil {
+				_ = runCmd(ctx, "apt-get", "install", "-y", "software-properties-common")
+			}
+			if _, lookErr := exec.LookPath("add-apt-repository"); lookErr == nil {
+				_ = runCmd(ctx, "add-apt-repository", "-y", "universe")
+				_ = runCmd(ctx, "apt-get", "update")
+				if retryErr := runCmd(ctx, "apt-get", "install", "-y", "dante-server"); retryErr == nil {
+					return nil
+				}
+			}
+		}
+		// Some distributions expose the daemon under a different package name.
+		if altErr := runCmd(ctx, "apt-get", "install", "-y", "sockd"); altErr == nil {
+			return nil
+		}
+		return fmt.Errorf("install dante-server failed; on Ubuntu enable universe first: sudo add-apt-repository universe && sudo apt-get update: %w", firstErr)
+	}
+}
+
+func isUbuntuHost() bool {
+	b, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return false
+	}
+	s := strings.ToLower(string(b))
+	return strings.Contains(s, "id=ubuntu") || strings.Contains(s, "id_like=ubuntu")
 }
 
 func applySystemUser(ctx context.Context, cfg Config) error {

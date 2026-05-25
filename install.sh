@@ -7,8 +7,8 @@ set -euo pipefail
 #   curl -fsSL https://raw.githubusercontent.com/haokexi/cm-agent/HEAD/install.sh | sudo bash -s -- \
 #     --server http://1.2.3.4:9879 \
 #     --agent-token "1:xxxx" \
-#     --remote-write-url "http://1.2.3.4:8428/api/v1/write" \
-#     --remote-write-bearer-token "yyyy"
+#     --remote-write-url "http://1.2.3.4:9090/api/v1/write" \
+#     --remote-write-authorization "Basic <base64>"
 #
 # Notes:
 # - agent token format is "<node_id>:<secret>" (also used to derive node_id label automatically).
@@ -36,7 +36,10 @@ GITHUB_PROXY=""
 SERVER=""
 AGENT_TOKEN=""
 RW_URL=""
+RW_AUTHORIZATION=""
 RW_BEARER=""
+RW_BASIC_USERNAME=""
+RW_BASIC_PASSWORD=""
 LABEL_KVS=()
 ENABLE_TERMINAL="true"
 TLS_INSECURE="false"
@@ -133,7 +136,10 @@ Options:
   --agent-token <node_id:secret>         agent long token (required)
 
   --remote-write-url <url>               remote_write URL (required)
-  --remote-write-bearer-token <token>    remote_write bearer token (required)
+  --remote-write-authorization <value>   full Authorization header value, e.g. Basic <base64>
+  --remote-write-bearer-token <token>    remote_write bearer token (optional if Authorization/Basic Auth is set)
+  --remote-write-basic-username <user>   remote_write Basic Auth username (optional if Authorization/bearer is set)
+  --remote-write-basic-password <pass>   remote_write Basic Auth password (optional if Authorization/bearer is set)
   --label <key=value>                    extra metric label, repeatable (max 256 bytes for key/value)
 
   --scrape-interval <dur>                default 15s
@@ -159,7 +165,10 @@ while [[ $# -gt 0 ]]; do
     --agent-token) AGENT_TOKEN="${2:-}"; shift 2 ;;
     --label) LABEL_KVS+=("${2:-}"); shift 2 ;;
     --remote-write-url) RW_URL="${2:-}"; shift 2 ;;
+    --remote-write-authorization) RW_AUTHORIZATION="${2:-}"; shift 2 ;;
     --remote-write-bearer-token) RW_BEARER="${2:-}"; shift 2 ;;
+    --remote-write-basic-username) RW_BASIC_USERNAME="${2:-}"; shift 2 ;;
+    --remote-write-basic-password) RW_BASIC_PASSWORD="${2:-}"; shift 2 ;;
     --scrape-interval) SCRAPE_INTERVAL="${2:-}"; shift 2 ;;
     --spool-max-bytes) SPOOL_MAX_BYTES="${2:-}"; shift 2 ;;
     --spool-dir) SPOOL_DIR="${2:-}"; SPOOL_DIR_SET="true"; shift 2 ;;
@@ -210,8 +219,8 @@ fi
 if [[ -z "${RW_URL}" ]]; then
   die "--remote-write-url is required"
 fi
-if [[ -z "${RW_BEARER}" ]]; then
-  die "--remote-write-bearer-token is required"
+if [[ -z "${RW_AUTHORIZATION}" && -z "${RW_BEARER}" && ( -z "${RW_BASIC_USERNAME}" || -z "${RW_BASIC_PASSWORD}" ) ]]; then
+  die "remote_write auth is required: use --remote-write-authorization, --remote-write-bearer-token, or --remote-write-basic-username/--remote-write-basic-password"
 fi
 if [[ "${ENABLE_TERMINAL}" == "true" && -z "${SERVER}" ]]; then
   die "--server is required when --enable-terminal=true"
@@ -347,8 +356,11 @@ labels:
 ${LABELS_EXTRA_YAML}
 
 remote_write:
-  url: "${RW_URL}"
-  bearer_token: "${RW_BEARER}"
+  url: "$(yaml_escape_double_quoted "${RW_URL}")"
+  authorization_header: "$(yaml_escape_double_quoted "${RW_AUTHORIZATION}")"
+  bearer_token: "$(yaml_escape_double_quoted "${RW_BEARER}")"
+  basic_username: "$(yaml_escape_double_quoted "${RW_BASIC_USERNAME}")"
+  basic_password: "$(yaml_escape_double_quoted "${RW_BASIC_PASSWORD}")"
   timeout: 10s
   max_series_per_request: 2000
   spool:
@@ -371,9 +383,9 @@ stream_unlock:
 
 terminal:
   enabled: ${ENABLE_TERMINAL}
-  server: "${SERVER}"
-  context_path: "${CONTEXT_PATH}"
-  agent_token: "${AGENT_TOKEN}"
+  server: "$(yaml_escape_double_quoted "${SERVER}")"
+  context_path: "$(yaml_escape_double_quoted "${CONTEXT_PATH}")"
+  agent_token: "$(yaml_escape_double_quoted "${AGENT_TOKEN}")"
   dial_timeout: 10s
   ping_interval: 30s
   tls_insecure_skip_verify: ${TLS_INSECURE}

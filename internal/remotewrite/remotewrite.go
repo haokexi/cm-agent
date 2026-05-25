@@ -19,9 +19,12 @@ import (
 type Label = prompb.Label
 
 type Config struct {
-	URL         string
-	BearerToken string
-	Timeout     time.Duration
+	URL                 string
+	AuthorizationHeader string
+	BearerToken         string
+	BasicUsername       string
+	BasicPassword       string
+	Timeout             time.Duration
 
 	MaxSeriesPerRequest int
 	UserAgent           string
@@ -132,8 +135,12 @@ func (c *Client) pushOnce(ctx context.Context, compressed []byte) error {
 	httpReq.Header.Set("Content-Encoding", "snappy")
 	httpReq.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
 	httpReq.Header.Set("User-Agent", c.cfg.UserAgent)
-	if strings.TrimSpace(c.cfg.BearerToken) != "" {
+	if strings.TrimSpace(c.cfg.AuthorizationHeader) != "" {
+		httpReq.Header.Set("Authorization", strings.TrimSpace(c.cfg.AuthorizationHeader))
+	} else if strings.TrimSpace(c.cfg.BearerToken) != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.cfg.BearerToken))
+	} else if strings.TrimSpace(c.cfg.BasicUsername) != "" || strings.TrimSpace(c.cfg.BasicPassword) != "" {
+		httpReq.SetBasicAuth(strings.TrimSpace(c.cfg.BasicUsername), c.cfg.BasicPassword)
 	}
 
 	resp, err := c.httpClient.Do(httpReq)

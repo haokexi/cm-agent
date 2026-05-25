@@ -44,10 +44,22 @@ func main() {
 			"remoteWrite.url",
 			"VictoriaMetrics single-node remote_write endpoint, e.g. https://vm.example.com:8428/api/v1/write",
 		).Envar("CM_REMOTE_WRITE_URL").Default("").String()
+		rwAuthorization = kingpin.Flag(
+			"remoteWrite.authorization",
+			"Full Authorization header value for remote_write, e.g. Basic <base64>.",
+		).Envar("CM_REMOTE_WRITE_AUTHORIZATION").Default("").String()
 		rwBearer = kingpin.Flag(
 			"remoteWrite.bearer-token",
 			"Bearer token for remote_write (sent as Authorization: Bearer <token>).",
 		).Envar("CM_REMOTE_WRITE_BEARER_TOKEN").Default("").String()
+		rwBasicUsername = kingpin.Flag(
+			"remoteWrite.basic-username",
+			"Basic Auth username for remote_write. Used when bearer token is empty.",
+		).Envar("CM_REMOTE_WRITE_BASIC_USERNAME").Default("").String()
+		rwBasicPassword = kingpin.Flag(
+			"remoteWrite.basic-password",
+			"Basic Auth password for remote_write. Used when bearer token is empty.",
+		).Envar("CM_REMOTE_WRITE_BASIC_PASSWORD").Default("").String()
 		timeout = kingpin.Flag(
 			"remoteWrite.timeout",
 			"HTTP timeout for a single remote_write request.",
@@ -196,7 +208,7 @@ func main() {
 	}
 	applyConfigDefaults(
 		loadedCfg,
-		rwURL, rwBearer, timeout, maxSeriesPerReq,
+		rwURL, rwAuthorization, rwBearer, rwBasicUsername, rwBasicPassword, timeout, maxSeriesPerReq,
 		spoolEnabled, spoolDir, spoolMaxBytes, spoolMaxFiles, flushMaxFiles,
 		interval, job, instance, labelKVs, disableDefaultCollectors, collectorFilters, logLevel,
 		probeJob, probeTimeout, probeICMP, probeTCP,
@@ -229,8 +241,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "missing required remoteWrite.url (or CM_REMOTE_WRITE_URL)")
 		os.Exit(2)
 	}
-	if strings.TrimSpace(*rwBearer) == "" {
-		fmt.Fprintln(os.Stderr, "missing required remoteWrite.bearer-token (or CM_REMOTE_WRITE_BEARER_TOKEN)")
+	if strings.TrimSpace(*rwAuthorization) == "" && strings.TrimSpace(*rwBearer) == "" && (strings.TrimSpace(*rwBasicUsername) == "" || strings.TrimSpace(*rwBasicPassword) == "") {
+		fmt.Fprintln(os.Stderr, "missing remote_write auth: set remoteWrite.authorization, remoteWrite.bearer-token, or remoteWrite.basic-username/basic-password")
 		os.Exit(2)
 	}
 
@@ -311,7 +323,10 @@ func main() {
 
 	rw := remotewrite.NewClient(remotewrite.Config{
 		URL:                 *rwURL,
+		AuthorizationHeader: *rwAuthorization,
 		BearerToken:         *rwBearer,
+		BasicUsername:       *rwBasicUsername,
+		BasicPassword:       *rwBasicPassword,
 		Timeout:             *timeout,
 		MaxSeriesPerRequest: *maxSeriesPerReq,
 		UserAgent:           buildinfo.UserAgent(),
@@ -769,7 +784,7 @@ func waitForInitialSyncLabels(ctx context.Context, ready <-chan struct{}, timeou
 
 func applyConfigDefaults(
 	cfg *config.Config,
-	rwURL, rwBearer *string,
+	rwURL, rwAuthorization, rwBearer, rwBasicUsername, rwBasicPassword *string,
 	timeout *time.Duration,
 	maxSeriesPerReq *int,
 	spoolEnabled *bool,
@@ -808,8 +823,17 @@ func applyConfigDefaults(
 	if *rwURL == "" && cfg.RemoteWrite.URL != "" {
 		*rwURL = cfg.RemoteWrite.URL
 	}
+	if *rwAuthorization == "" && cfg.RemoteWrite.AuthorizationHeader != "" {
+		*rwAuthorization = cfg.RemoteWrite.AuthorizationHeader
+	}
 	if *rwBearer == "" && cfg.RemoteWrite.BearerToken != "" {
 		*rwBearer = cfg.RemoteWrite.BearerToken
+	}
+	if *rwBasicUsername == "" && cfg.RemoteWrite.BasicUsername != "" {
+		*rwBasicUsername = cfg.RemoteWrite.BasicUsername
+	}
+	if *rwBasicPassword == "" && cfg.RemoteWrite.BasicPassword != "" {
+		*rwBasicPassword = cfg.RemoteWrite.BasicPassword
 	}
 	if *timeout == 10*time.Second && cfg.RemoteWrite.Timeout.Duration > 0 {
 		*timeout = cfg.RemoteWrite.Timeout.Duration

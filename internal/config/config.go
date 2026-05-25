@@ -33,7 +33,10 @@ type Config struct {
 
 	RemoteWrite struct {
 		URL                 string   `yaml:"url"`
+		AuthorizationHeader string   `yaml:"authorization_header"`
 		BearerToken         string   `yaml:"bearer_token"`
+		BasicUsername       string   `yaml:"basic_username"`
+		BasicPassword       string   `yaml:"basic_password"`
 		Timeout             Duration `yaml:"timeout"`
 		MaxSeriesPerRequest int      `yaml:"max_series_per_request"`
 

@@ -3,10 +3,13 @@ package dante
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -23,6 +26,11 @@ const (
 	configPath  = "/etc/danted.conf"
 	metaPath    = "/etc/danted/client-meta.json"
 	binaryPath  = "/usr/sbin/sockd"
+	servicePath = "/etc/systemd/system/danted.service"
+
+	danteSourceVersion = "1.4.4"
+	danteSourceURL     = "https://www.inet.no/dante/files/dante-1.4.4.tar.gz"
+	danteSourceSHA256  = "1973c7732f1f9f0a4c0ccf2c1ce462c7c25060b25643ea90f9b98f53a813faec"
 )
 
 type Config struct {
@@ -164,6 +172,9 @@ func (m *Manager) install(ctx context.Context, req Request) (string, error) {
 	if err := writeMeta(cfg); err != nil {
 		return "", err
 	}
+	if err := ensureSystemdService(); err != nil {
+		return "", err
+	}
 	if err := runSystemctl(ctx, "enable", serviceName); err != nil {
 		return "", err
 	}
@@ -216,22 +227,30 @@ func installPackage(ctx context.Context) error {
 	if isInstalled() {
 		return nil
 	}
+	var packageErr error
 	if _, err := exec.LookPath("apt-get"); err == nil {
-		return installPackageApt(ctx)
-	}
-	if _, err := exec.LookPath("dnf"); err == nil {
+		packageErr = installPackageApt(ctx)
+	} else if _, err := exec.LookPath("dnf"); err == nil {
 		if err := runCmd(ctx, "dnf", "install", "-y", "dante-server"); err != nil {
-			return fmt.Errorf("install dante-server failed; on RHEL/CentOS enable EPEL first: %w", err)
+			packageErr = fmt.Errorf("install dante-server failed; on RHEL/CentOS enable EPEL first: %w", err)
 		}
-		return nil
-	}
-	if _, err := exec.LookPath("yum"); err == nil {
+	} else if _, err := exec.LookPath("yum"); err == nil {
 		if err := runCmd(ctx, "yum", "install", "-y", "dante-server"); err != nil {
-			return fmt.Errorf("install dante-server failed; on RHEL/CentOS enable EPEL first: %w", err)
+			packageErr = fmt.Errorf("install dante-server failed; on RHEL/CentOS enable EPEL first: %w", err)
 		}
+	} else {
+		packageErr = errors.New("no supported package manager found for package install (apt-get/dnf/yum)")
+	}
+	if isInstalled() {
 		return nil
 	}
-	return errors.New("no supported package manager found (apt-get/dnf/yum)")
+	if err := installFromSource(ctx); err != nil {
+		if packageErr != nil {
+			return fmt.Errorf("package install failed (%v); source build failed: %w", packageErr, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func installPackageApt(ctx context.Context) error {
@@ -257,8 +276,94 @@ func installPackageApt(ctx context.Context) error {
 		if altErr := runCmd(ctx, "apt-get", "install", "-y", "sockd"); altErr == nil {
 			return nil
 		}
-		return fmt.Errorf("install dante-server failed; on Ubuntu enable universe first: sudo add-apt-repository universe && sudo apt-get update: %w", firstErr)
+		return fmt.Errorf("install dante-server failed; will try source build fallback: %w", firstErr)
 	}
+}
+
+func installFromSource(ctx context.Context) error {
+	if err := installBuildDependencies(ctx); err != nil {
+		return err
+	}
+	tmpDir, err := os.MkdirTemp("", "cm-agent-dante-build-*")
+	if err != nil {
+		return fmt.Errorf("create build dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	archivePath := filepath.Join(tmpDir, "dante-"+danteSourceVersion+".tar.gz")
+	if err := downloadFile(ctx, danteSourceURL, archivePath); err != nil {
+		return err
+	}
+	if err := verifySHA256(archivePath, danteSourceSHA256); err != nil {
+		return err
+	}
+	if err := runCmd(ctx, "tar", "-xzf", archivePath, "-C", tmpDir); err != nil {
+		return err
+	}
+	sourceDir := filepath.Join(tmpDir, "dante-"+danteSourceVersion)
+	configureArgs := []string{
+		"--prefix=/usr",
+		"--sbindir=/usr/sbin",
+		"--sysconfdir=/etc",
+		"--localstatedir=/var",
+		"--without-libwrap",
+		"--without-upnp",
+		"--without-gssapi",
+	}
+	if err := runCmdDir(ctx, sourceDir, "./configure", configureArgs...); err != nil {
+		return err
+	}
+	if err := runCmdDir(ctx, sourceDir, "make", "-j"+strconv.Itoa(runtime.NumCPU())); err != nil {
+		return err
+	}
+	if err := runCmdDir(ctx, sourceDir, "make", "install"); err != nil {
+		return err
+	}
+	if !isInstalled() {
+		return errors.New("source build completed but /usr/sbin/sockd was not installed")
+	}
+	return nil
+}
+
+func installBuildDependencies(ctx context.Context) error {
+	if _, err := exec.LookPath("apt-get"); err == nil {
+		_ = runCmd(ctx, "apt-get", "update")
+		return runCmd(ctx, "apt-get", "install", "-y", "build-essential", "ca-certificates", "curl", "tar", "libpam0g-dev")
+	}
+	if _, err := exec.LookPath("dnf"); err == nil {
+		return runCmd(ctx, "dnf", "install", "-y", "gcc", "make", "glibc-devel", "ca-certificates", "curl", "tar", "pam-devel")
+	}
+	if _, err := exec.LookPath("yum"); err == nil {
+		return runCmd(ctx, "yum", "install", "-y", "gcc", "make", "glibc-devel", "ca-certificates", "curl", "tar", "pam-devel")
+	}
+	return errors.New("no supported package manager found for source build dependencies (apt-get/dnf/yum)")
+}
+
+func downloadFile(ctx context.Context, url, target string) error {
+	if _, err := exec.LookPath("curl"); err == nil {
+		return runCmd(ctx, "curl", "-fsSL", "--retry", "3", "-o", target, url)
+	}
+	if _, err := exec.LookPath("wget"); err == nil {
+		return runCmd(ctx, "wget", "-O", target, url)
+	}
+	return errors.New("curl or wget is required to download Dante source")
+}
+
+func verifySHA256(path, expected string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open downloaded source: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hash downloaded source: %w", err)
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("Dante source sha256 mismatch: got %s, want %s", actual, expected)
+	}
+	return nil
 }
 
 func isUbuntuHost() bool {
@@ -548,6 +653,32 @@ func openFirewallPort(ctx context.Context, port int) (string, error) {
 	return strings.Join(notes, ", "), nil
 }
 
+func ensureSystemdService() error {
+	if _, err := os.Stat(servicePath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	unit := strings.Join([]string{
+		"[Unit]",
+		"Description=Dante SOCKS5 Server",
+		"After=network-online.target",
+		"Wants=network-online.target",
+		"",
+		"[Service]",
+		"Type=simple",
+		"ExecStart=" + binaryPath + " -f " + configPath,
+		"ExecReload=/bin/kill -HUP $MAINPID",
+		"Restart=on-failure",
+		"RestartSec=5s",
+		"LimitNOFILE=1048576",
+		"",
+		"[Install]",
+		"WantedBy=multi-user.target",
+	}, "\n") + "\n"
+	return os.WriteFile(servicePath, []byte(unit), 0o644)
+}
+
 func runSystemctl(ctx context.Context, args ...string) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return errors.New("systemctl is required")
@@ -555,14 +686,25 @@ func runSystemctl(ctx context.Context, args ...string) error {
 	return runCmd(ctx, "systemctl", args...)
 }
 func runCmd(ctx context.Context, name string, args ...string) error {
+	return runCmdDir(ctx, "", name, args...)
+}
+
+func runCmdDir(ctx context.Context, dir, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(output))
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), msg)
+		cmdText := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		if dir != "" {
+			return fmt.Errorf("(cd %s && %s): %s", dir, cmdText, msg)
+		}
+		return fmt.Errorf("%s: %s", cmdText, msg)
 	}
 	return nil
 }

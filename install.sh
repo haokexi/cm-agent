@@ -20,10 +20,11 @@ SERVICE_NAME="cm-agent"
 
 # Download source: auto (GitHub first, fall back to Gitee), github, or gitee.
 SOURCE="auto"
-# curl options that make a slow/stuck GitHub give up fast so we can fall back:
-# - bail if connecting takes >10s
-# - bail if throughput stays under ~2KB/s for 20s (i.e. "GitHub too slow")
-CURL_TIMEOUT_OPTS=(--connect-timeout 10 --speed-limit 2048 --speed-time 20)
+# Timeouts (seconds). The GitHub attempt has a HARD total cap so a slow-but-
+# trickling GitHub (common in CN) is abandoned and we fall back to Gitee,
+# instead of waiting forever. Tunable via --connect-timeout / --github-timeout.
+CONNECT_TIMEOUT=8
+GITHUB_TIMEOUT=25
 
 # Install layout:
 # - Place binary and config under /opt/cm-agent (avoid polluting host PATH/bin).
@@ -139,6 +140,8 @@ Options:
   --version <tag|latest>                 Release tag (default: latest)
   --source <auto|github|gitee>           download source (default: auto = GitHub first, fall back to Gitee)
   --gitee-repo <owner/repo>              Gitee repo for fallback (default: peng2018/cm-agent)
+  --connect-timeout <secs>               TCP connect timeout per attempt (default: 8)
+  --github-timeout <secs>                hard cap per GitHub attempt; exceed => fall back to Gitee (default: 25)
   --ghproxy <prefix>                     GitHub proxy prefix (optional), e.g. https://mirror.ghproxy.com
 
   --server <http(s)://host:port>         cloud-monitor server base address (required if --enable-terminal)
@@ -171,6 +174,8 @@ while [[ $# -gt 0 ]]; do
     --version) VERSION="${2:-}"; shift 2 ;;
     --source) SOURCE="${2:-}"; shift 2 ;;
     --gitee-repo) GITEE_REPO="${2:-}"; shift 2 ;;
+    --connect-timeout) CONNECT_TIMEOUT="${2:-}"; shift 2 ;;
+    --github-timeout) GITHUB_TIMEOUT="${2:-}"; shift 2 ;;
     --ghproxy) GITHUB_PROXY="${2:-}"; shift 2 ;;
     --server) SERVER="${2:-}"; shift 2 ;;
     --context-path) CONTEXT_PATH="${2:-}"; shift 2 ;;
@@ -197,6 +202,14 @@ case "${SOURCE}" in
   auto|github|gitee) ;;
   *) die "invalid --source: ${SOURCE} (expect auto|github|gitee)" ;;
 esac
+
+# Per-source curl timeouts (built after flag parsing).
+# GitHub: aggressive — hard total cap + abort if <10KB/s for 8s, so we fall back fast.
+# Gitee:  lenient — it is the fallback we actually want to complete.
+GITHUB_DL_OPTS=(--connect-timeout "${CONNECT_TIMEOUT}" --max-time "${GITHUB_TIMEOUT}" --speed-limit 10240 --speed-time 8)
+GITEE_DL_OPTS=(--connect-timeout 10 --speed-limit 1024 --speed-time 30)
+GITHUB_META_OPTS=(--connect-timeout "${CONNECT_TIMEOUT}" --max-time 12)
+GITEE_META_OPTS=(--connect-timeout 10 --max-time 15)
 
 # If user overrides --data-dir but not --spool-dir, keep spool colocated under data dir.
 if [[ "${SPOOL_DIR_SET}" != "true" ]]; then
@@ -249,7 +262,7 @@ LABELS_EXTRA_YAML="$(build_labels_extra_yaml)"
 resolve_latest_tag_github() {
   # Follow redirects and extract final path segment "vX.Y.Z" from Location header.
   local loc
-  loc="$(curl -fsSLI "${CURL_TIMEOUT_OPTS[@]}" "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+  loc="$(curl -fsSLI "${GITHUB_META_OPTS[@]}" "https://github.com/${REPO}/releases/latest" 2>/dev/null \
     | awk -F': ' 'tolower($1)=="location"{print $2}' | tail -n 1 | tr -d '\r')" || return 1
   [[ -n "${loc}" ]] || return 1
   echo "${loc##*/}"
@@ -258,7 +271,7 @@ resolve_latest_tag_github() {
 resolve_latest_tag_gitee() {
   # Gitee API is public-readable; parse "tag_name":"vX.Y.Z" without needing jq.
   local body tag
-  body="$(curl -fsSL "${CURL_TIMEOUT_OPTS[@]}" \
+  body="$(curl -fsSL "${GITEE_META_OPTS[@]}" \
     "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/latest" 2>/dev/null)" || return 1
   tag="$(printf '%s' "${body}" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
   [[ -n "${tag}" ]] || return 1
@@ -309,10 +322,16 @@ download_from_candidates() {
   shift
   local -a urls=("$@")
   local u
+  local -a opts
   for u in "${urls[@]}"; do
+    # Pick aggressive (GitHub) vs lenient (Gitee) timeouts by host.
+    case "${u}" in
+      *gitee.com*) opts=("${GITEE_DL_OPTS[@]}") ;;
+      *)           opts=("${GITHUB_DL_OPTS[@]}") ;;
+    esac
     # Progress goes to stderr; stdout is reserved for the winning URL (captured by caller).
     echo "[cm-agent]   trying: ${u}" >&2
-    if curl -fsSL "${CURL_TIMEOUT_OPTS[@]}" -o "${out}" "${u}" >/dev/null 2>&1; then
+    if curl -fsSL "${opts[@]}" -o "${out}" "${u}" >/dev/null 2>&1; then
       echo "${u}"
       return 0
     fi

@@ -301,20 +301,20 @@ with_proxy() {
 }
 
 # Build the ordered list of candidate URLs for a release file, honoring --source.
-# auto: GitHub (optionally proxied) first, then Gitee as fallback.
+# Order: for each tag spelling, try all sources (GitHub then Gitee) before moving
+# on to the alternate spelling — so a wasted alt-spelling attempt never delays the
+# GitHub->Gitee fallback for the real tag.
 build_release_urls() {
   local file="$1"
   local t
-  if [[ "${SOURCE}" == "github" || "${SOURCE}" == "auto" ]]; then
-    for t in "${tags_to_try[@]}"; do
+  for t in "${tags_to_try[@]}"; do
+    if [[ "${SOURCE}" == "github" || "${SOURCE}" == "auto" ]]; then
       with_proxy "https://github.com/${REPO}/releases/download/${t}/${file}"
-    done
-  fi
-  if [[ "${SOURCE}" == "gitee" || "${SOURCE}" == "auto" ]]; then
-    for t in "${tags_to_try[@]}"; do
+    fi
+    if [[ "${SOURCE}" == "gitee" || "${SOURCE}" == "auto" ]]; then
       echo "https://gitee.com/${GITEE_REPO}/releases/download/${t}/${file}"
-    done
-  fi
+    fi
+  done
 }
 
 download_from_candidates() {
@@ -345,12 +345,9 @@ if [[ "${VERSION}" == "latest" ]]; then
 fi
 
 asset="cm-agent-linux-${arch}.tgz"
+# Release tags are always "vX.Y.Z"; normalize a bare version to have the v prefix.
+[[ "${tag}" == v* ]] || tag="v${tag}"
 tags_to_try=("${tag}")
-if [[ "${tag}" == v* ]]; then
-  tags_to_try+=("${tag#v}")
-else
-  tags_to_try+=("v${tag}")
-fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
@@ -367,7 +364,7 @@ if [[ -z "${downloaded_from}" ]]; then
   for u in "${asset_urls[@]}"; do
     echo "  - ${u}"
   done
-  echo "[cm-agent] ERROR: the release may exist but ${asset} was not uploaded, or the tag differs (e.g. v${tag})."
+  echo "[cm-agent] ERROR: the release ${tag} may exist but ${asset} was not uploaded for it."
   echo "[cm-agent] ERROR: fix by publishing release assets (run: ./scripts/publish_release.sh) or install with --version <existing-tag>."
   exit 1
 fi

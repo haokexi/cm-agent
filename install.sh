@@ -15,7 +15,15 @@ set -euo pipefail
 # - this installer writes config to /opt/cm-agent/config.yaml and installs a systemd unit.
 
 REPO="haokexi/cm-agent"
+GITEE_REPO="peng2018/cm-agent"
 SERVICE_NAME="cm-agent"
+
+# Download source: auto (GitHub first, fall back to Gitee), github, or gitee.
+SOURCE="auto"
+# curl options that make a slow/stuck GitHub give up fast so we can fall back:
+# - bail if connecting takes >10s
+# - bail if throughput stays under ~2KB/s for 20s (i.e. "GitHub too slow")
+CURL_TIMEOUT_OPTS=(--connect-timeout 10 --speed-limit 2048 --speed-time 20)
 
 # Install layout:
 # - Place binary and config under /opt/cm-agent (avoid polluting host PATH/bin).
@@ -129,6 +137,8 @@ Usage:
 
 Options:
   --version <tag|latest>                 Release tag (default: latest)
+  --source <auto|github|gitee>           download source (default: auto = GitHub first, fall back to Gitee)
+  --gitee-repo <owner/repo>              Gitee repo for fallback (default: peng2018/cm-agent)
   --ghproxy <prefix>                     GitHub proxy prefix (optional), e.g. https://mirror.ghproxy.com
 
   --server <http(s)://host:port>         cloud-monitor server base address (required if --enable-terminal)
@@ -159,6 +169,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --version) VERSION="${2:-}"; shift 2 ;;
+    --source) SOURCE="${2:-}"; shift 2 ;;
+    --gitee-repo) GITEE_REPO="${2:-}"; shift 2 ;;
     --ghproxy) GITHUB_PROXY="${2:-}"; shift 2 ;;
     --server) SERVER="${2:-}"; shift 2 ;;
     --context-path) CONTEXT_PATH="${2:-}"; shift 2 ;;
@@ -180,6 +192,11 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown arg: $1" ;;
   esac
 done
+
+case "${SOURCE}" in
+  auto|github|gitee) ;;
+  *) die "invalid --source: ${SOURCE} (expect auto|github|gitee)" ;;
+esac
 
 # If user overrides --data-dir but not --spool-dir, keep spool colocated under data dir.
 if [[ "${SPOOL_DIR_SET}" != "true" ]]; then
@@ -229,13 +246,36 @@ fi
 normalize_and_validate_labels
 LABELS_EXTRA_YAML="$(build_labels_extra_yaml)"
 
-resolve_latest_tag() {
-  local url="https://github.com/${REPO}/releases/latest"
+resolve_latest_tag_github() {
   # Follow redirects and extract final path segment "vX.Y.Z" from Location header.
   local loc
-  loc="$(curl -fsSLI "${url}" | awk -F': ' 'tolower($1)=="location"{print $2}' | tail -n 1 | tr -d '\r')"
-  [[ -n "${loc}" ]] || die "failed to resolve latest version (no Location header)"
+  loc="$(curl -fsSLI "${CURL_TIMEOUT_OPTS[@]}" "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+    | awk -F': ' 'tolower($1)=="location"{print $2}' | tail -n 1 | tr -d '\r')" || return 1
+  [[ -n "${loc}" ]] || return 1
   echo "${loc##*/}"
+}
+
+resolve_latest_tag_gitee() {
+  # Gitee API is public-readable; parse "tag_name":"vX.Y.Z" without needing jq.
+  local body tag
+  body="$(curl -fsSL "${CURL_TIMEOUT_OPTS[@]}" \
+    "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/latest" 2>/dev/null)" || return 1
+  tag="$(printf '%s' "${body}" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "${tag}" ]] || return 1
+  echo "${tag}"
+}
+
+resolve_latest_tag() {
+  local t=""
+  if [[ "${SOURCE}" == "github" || "${SOURCE}" == "auto" ]]; then
+    t="$(resolve_latest_tag_github || true)"
+    [[ -z "${t}" && "${SOURCE}" == "auto" ]] && echo "[cm-agent] GitHub latest lookup failed/slow; trying Gitee..." >&2
+  fi
+  if [[ -z "${t}" && ( "${SOURCE}" == "gitee" || "${SOURCE}" == "auto" ) ]]; then
+    t="$(resolve_latest_tag_gitee || true)"
+  fi
+  [[ -n "${t}" ]] || die "failed to resolve latest version from GitHub/Gitee"
+  echo "${t}"
 }
 
 with_proxy() {
@@ -247,13 +287,32 @@ with_proxy() {
   echo "${url}"
 }
 
+# Build the ordered list of candidate URLs for a release file, honoring --source.
+# auto: GitHub (optionally proxied) first, then Gitee as fallback.
+build_release_urls() {
+  local file="$1"
+  local t
+  if [[ "${SOURCE}" == "github" || "${SOURCE}" == "auto" ]]; then
+    for t in "${tags_to_try[@]}"; do
+      with_proxy "https://github.com/${REPO}/releases/download/${t}/${file}"
+    done
+  fi
+  if [[ "${SOURCE}" == "gitee" || "${SOURCE}" == "auto" ]]; then
+    for t in "${tags_to_try[@]}"; do
+      echo "https://gitee.com/${GITEE_REPO}/releases/download/${t}/${file}"
+    done
+  fi
+}
+
 download_from_candidates() {
   local out="$1"
   shift
   local -a urls=("$@")
   local u
   for u in "${urls[@]}"; do
-    if curl -fsSL -o "${out}" "${u}" >/dev/null 2>&1; then
+    # Progress goes to stderr; stdout is reserved for the winning URL (captured by caller).
+    echo "[cm-agent]   trying: ${u}" >&2
+    if curl -fsSL "${CURL_TIMEOUT_OPTS[@]}" -o "${out}" "${u}" >/dev/null 2>&1; then
       echo "${u}"
       return 0
     fi
@@ -277,12 +336,11 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
+# bash 3.2 has no mapfile; collect candidate URLs line by line.
 asset_urls=()
-for t in "${tags_to_try[@]}"; do
-  asset_urls+=("$(with_proxy "https://github.com/${REPO}/releases/download/${t}/${asset}")")
-done
+while IFS= read -r line; do [[ -n "${line}" ]] && asset_urls+=("${line}"); done < <(build_release_urls "${asset}")
 
-log "downloading ${asset} (${tag})..."
+log "downloading ${asset} (${tag}) [source: ${SOURCE}]..."
 downloaded_from="$(download_from_candidates "${tmp}/${asset}" "${asset_urls[@]}" || true)"
 if [[ -z "${downloaded_from}" ]]; then
   echo "[cm-agent] ERROR: failed to download release asset."
@@ -290,16 +348,14 @@ if [[ -z "${downloaded_from}" ]]; then
   for u in "${asset_urls[@]}"; do
     echo "  - ${u}"
   done
-  echo "[cm-agent] ERROR: this usually means the GitHub Release exists but the ${asset} asset was not uploaded (or the tag differs, e.g. v${tag})."
-  echo "[cm-agent] ERROR: fix by publishing release assets (run: make release && TAG=vX.Y.Z make github-release) or install with --version <existing-tag>."
+  echo "[cm-agent] ERROR: the release may exist but ${asset} was not uploaded, or the tag differs (e.g. v${tag})."
+  echo "[cm-agent] ERROR: fix by publishing release assets (run: ./scripts/publish_release.sh) or install with --version <existing-tag>."
   exit 1
 fi
 
 sha_asset="${asset}.sha256"
 sha_urls=()
-for t in "${tags_to_try[@]}"; do
-  sha_urls+=("$(with_proxy "https://github.com/${REPO}/releases/download/${t}/${sha_asset}")")
-done
+while IFS= read -r line; do [[ -n "${line}" ]] && sha_urls+=("${line}"); done < <(build_release_urls "${sha_asset}")
 
 sha_from="$(download_from_candidates "${tmp}/${sha_asset}" "${sha_urls[@]}" || true)"
 if [[ -n "${sha_from}" ]]; then

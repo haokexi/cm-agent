@@ -1,7 +1,7 @@
 .PHONY: help test build clean \
 	build-linux-amd64 build-linux-arm64 \
 	release-linux-amd64 release-linux-arm64 release \
-	github-release
+	github-release publish
 
 APP := cm-agent
 DIST_DIR := dist
@@ -67,6 +67,12 @@ release: release-linux-amd64 release-linux-arm64
 
 github-release:
 	@./scripts/github_release.sh "$(TAG)"
+
+# One command: build + tag + push + publish a GitHub release using .github-token.
+#   make publish              # auto-bump patch from latest tag
+#   make publish TAG=v0.2.0   # explicit version
+publish:
+	@./scripts/publish_release.sh "$(TAG)"
 
 clean:
 	rm -rf $(DIST_DIR)

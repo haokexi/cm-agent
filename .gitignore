@@ -8,3 +8,7 @@
 # IDE
 /.idea/
 
+
+# GitHub token for releases (never commit)
+/.github-token
+/.gitee-token
